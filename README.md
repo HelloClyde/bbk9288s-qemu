@@ -8,7 +8,7 @@ S1C33L05 CPU、9288S 板级外设、四灰阶 LCD、触摸/按键、持久化 NA
 
 这是非官方逆向工程项目，与步步高、Epson 或 QEMU 项目没有隶属关系。
 
-![Web 控制台和 9288S 海盗船画面](docs/assets/preview.png)
+![Web 控制台中的《三国霸业》和《海盗船》画面](docs/assets/preview.png)
 
 ## 当前状态
 
@@ -18,7 +18,7 @@ S1C33L05 CPU、9288S 板级外设、四灰阶 LCD、触摸/按键、持久化 NA
 - 方向键通过 K5 GPIO，确定/退出通过 P0 GPIO 进入固件。
 - Timer2-B 提供 GUI 和游戏需要的系统节拍。
 - Samsung 兼容 `EC DA 10 95` NAND 支持读取、编程、擦除和退出保存。
-- Web 端可以游玩固件自带的“海盗船”，并管理 NAND 文件。
+- Web 端可以游玩固件自带的《三国霸业》和《海盗船》，并管理 NAND 文件。
 
 触摸和按键只经过 QEMU 的 FPT、GPIO、串行 ADC 与定时器模型；源码不包含
 guest 内存注入、系统 API 注入或应用级 hook。其余诊断属性只用于逆向研究，
