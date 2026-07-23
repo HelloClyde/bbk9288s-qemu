@@ -53,11 +53,11 @@ Copy-Item -LiteralPath (Join-Path $root "web\dist") `
     -Destination (Join-Path $output "web") -Recurse
 
 $runtimeReadme = @"
-Place these files in this directory before starting the emulator:
+Place this file in this directory before starting the emulator:
 
-  kernel.bin       BBK 9288S KNL firmware (not distributed with source)
   nand-user.raw    276,824,064-byte raw NAND image including OOB
 
+The board loader finds kernel.bin inside the NAND FAT16 filesystem.
 The test NAND release archive already uses this directory layout.
 "@
 Set-Content -LiteralPath (Join-Path $output "runtime\README.txt") `
@@ -95,7 +95,8 @@ while ($queue.Count -gt 0) {
 $manifest = Get-ChildItem -LiteralPath $output -Recurse -File |
     ForEach-Object {
         $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        $relative = [System.IO.Path]::GetRelativePath($output, $_.FullName).Replace("\", "/")
+        $relative = $_.FullName.Substring($output.Length)
+        $relative = $relative.TrimStart([char[]]"\/").Replace("\", "/")
         "$hash  $relative"
     }
 Set-Content -LiteralPath (Join-Path $output "SHA256SUMS.txt") `

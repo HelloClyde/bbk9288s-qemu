@@ -300,9 +300,15 @@ def run(args: argparse.Namespace) -> int:
     qemu = Path(args.qemu)
     if not qemu.is_absolute():
         qemu = root / qemu
-    kernel = Path(args.kernel)
-    if not kernel.is_absolute():
-        kernel = root / kernel
+    nand = Path(args.nand)
+    if not nand.is_absolute():
+        nand = root / nand
+    args.machine_opt.insert(0, f"nand-image={nand.resolve().as_posix()}")
+    kernel = None
+    if args.kernel:
+        kernel = Path(args.kernel)
+        if not kernel.is_absolute():
+            kernel = root / kernel
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     prefix = f"{args.prefix}-fpt{args.touch_fpt}-{stamp}"
@@ -321,8 +327,6 @@ def run(args: argparse.Namespace) -> int:
         machine_opts(args),
         "-cpu",
         cpu_opts(args),
-        "-kernel",
-        str(kernel),
         "-rtc",
         f"base={args.rtc_base}",
         "-nographic",
@@ -337,8 +341,10 @@ def run(args: argparse.Namespace) -> int:
         "-D",
         str(log_path),
     ]
+    if kernel is not None:
+        cmd.extend(["-kernel", str(kernel.resolve())])
     if args.paused:
-        cmd.insert(7, "-S")
+        cmd.append("-S")
 
     env = os.environ.copy()
     if args.msys_path:
@@ -474,7 +480,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".")
     parser.add_argument("--qemu", default="build/qemu-system-s1c33.exe")
-    parser.add_argument("--kernel", default="build/bbk9288s-test/kernel.bin")
+    parser.add_argument(
+        "--nand",
+        default="../eebbk9288s-runtime/nand-user.raw",
+        help="raw NAND image containing kernel.bin",
+    )
+    parser.add_argument(
+        "--kernel",
+        help="explicit kernel override for blank-NAND research only",
+    )
     parser.add_argument(
         "--rtc-base",
         default="localtime",

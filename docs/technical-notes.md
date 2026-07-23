@@ -180,14 +180,17 @@ fallback tries a hard link first, then copies files or directories.
 
 ## Run
 
-The GLib file loader used by this Windows build did not accept the original
-firmware path because it contains non-ASCII characters. Copy the kernel to an
-ASCII-only path first:
+The raw NAND image is the only required guest image. Place it at the default
+runtime path:
 
 ```powershell
-New-Item -ItemType Directory -Force 'E:\eebbk9288s-qemu\build\bbk9288s-test' | Out-Null
-Copy-Item -LiteralPath 'D:\Downloads\步步高9288s系统文件\系统\kernel.bin' -Destination 'E:\eebbk9288s-qemu\build\bbk9288s-test\kernel.bin' -Force
+E:\eebbk9288s-runtime\nand-user.raw
 ```
+
+At reset, the board loader reconstructs the logical image from the NAND OOB
+FTL tags, parses its FAT16 partition, walks the directory tree, and loads
+`kernel.bin` from inside the NAND. No separate kernel file is required for
+normal use.
 
 For the Web frontend, run:
 
@@ -232,23 +235,23 @@ For a local GTK/SDL window instead, run:
 .\run-bbk9288s.cmd
 ```
 
-The launcher creates `build\bbk9288s-test\nand-user.raw` on first use and keeps
-using it for guest saves. It opens the GTK display by default; pass `sdl` to the
-CMD launcher to select SDL. The mouse drives the touch panel. Arrow keys drive
-the four directions, Enter/Space confirms, and Esc/Backspace exits.
+The launcher reuses `E:\eebbk9288s-runtime\nand-user.raw` for guest saves. It
+opens the GTK display by default; pass `sdl` to the CMD launcher to select SDL.
+The mouse drives the touch panel. Arrow keys drive the four directions,
+Enter/Space confirms, and Esc/Backspace exits.
 
 The display model renders internal VRAM at `0x003c0000` as the portrait
 `160x240`, 2 bpp, four-gray framebuffer used by the firmware.
 
 ```powershell
 $env:PATH='C:\msys64\ucrt64\bin;C:\msys64\usr\bin;' + $env:PATH
-E:\eebbk9288s-qemu\build\qemu-system-s1c33.exe -M bbk9288s -display none -kernel E:\eebbk9288s-qemu\build\bbk9288s-test\kernel.bin -serial none -monitor none -d guest_errors,int -D E:\eebbk9288s-qemu\build\bbk9288s-test\display.log
+E:\eebbk9288s-qemu\build\qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw -display none -serial none -monitor none -d guest_errors,int -D E:\eebbk9288s-qemu\build\bbk9288s-test\display.log
 ```
 
 To dump the current LCD framebuffer to PGM without a GUI backend:
 
 ```powershell
-& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/lcd-dump.pgm build/bbk9288s-test/run-lcd-dump.log; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,debug-lcd-dump-ms=1000,debug-lcd-dump-path=build/bbk9288s-test/lcd-dump.pgm -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-lcd-dump.log'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/lcd-dump.pgm build/bbk9288s-test/run-lcd-dump.log; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw,debug-lcd-dump-ms=1000,debug-lcd-dump-path=build/bbk9288s-test/lcd-dump.pgm -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-lcd-dump.log'
 ```
 
 The firmware's exact calibration targets are `(16,24)`, `(144,216)`, and
@@ -283,7 +286,7 @@ python scripts\bbk9288s_nand_image.py install build\bbk9288s-test\nand-formatted
 Run the machine with the resulting persistent image:
 
 ```powershell
-build\qemu-system-s1c33.exe -M bbk9288s,nand-image=build/bbk9288s-test/nand-system.raw -cpu c33l05,exit-on-halt=off -kernel build/bbk9288s-test/kernel.bin -rtc base=localtime -nographic -serial none -monitor none
+build\qemu-system-s1c33.exe -M bbk9288s,nand-image=build/bbk9288s-test/nand-system.raw -cpu c33l05,exit-on-halt=off -rtc base=localtime -nographic -serial none -monitor none
 ```
 
 The verified local image contains 285 files totaling 137,874,541 bytes and maps
@@ -309,12 +312,12 @@ With `exit-on-halt=off`, the Timer3-B model wakes that HALT. In the earlier
 raw I/O model this reached the IRAM idle SLP point at `0x00001cb4`; with the
 current GPIO input-high model the firmware runs a stable HALT/timer IRQ loop
 instead, without unimplemented opcodes or BRK stops in the short verification
-run:
+Run:
 
 ```powershell
 $env:CHERE_INVOKING = '1'
 $env:MSYSTEM = 'UCRT64'
-& 'C:\msys64\usr\bin\bash.exe' -lc 'cd /e/eebbk9288s-qemu && timeout 5s build/qemu-system-s1c33.exe -M bbk9288s -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-timerwake.log; echo exit:$?'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'cd /e/eebbk9288s-qemu && timeout 5s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-timerwake.log; echo exit:$?'
 ```
 
 To set the port input 4 interrupt factor after startup for diagnostics:
@@ -322,7 +325,7 @@ To set the port input 4 interrupt factor after startup for diagnostics:
 ```powershell
 $env:CHERE_INVOKING = '1'
 $env:MSYSTEM = 'UCRT64'
-& 'C:\msys64\usr\bin\bash.exe' -lc 'cd /e/eebbk9288s-qemu && timeout 6s build/qemu-system-s1c33.exe -M bbk9288s,debug-port4-wakeup-ms=1000 -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-port4wake-gpio.log; echo exit:$?'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'cd /e/eebbk9288s-qemu && timeout 6s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw,debug-port4-wakeup-ms=1000 -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-port4wake-gpio.log; echo exit:$?'
 ```
 
 To send a real QEMU key event through QMP:
@@ -330,7 +333,7 @@ To send a real QEMU key event through QMP:
 ```powershell
 $env:PATH='C:\msys64\ucrt64\bin;C:\msys64\usr\bin;' + $env:PATH
 $port = 4561
-E:\eebbk9288s-qemu\build\qemu-system-s1c33.exe -M bbk9288s -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel E:\eebbk9288s-qemu\build\bbk9288s-test\kernel.bin -nographic -serial none -monitor none -qmp tcp:127.0.0.1:$port,server=on,wait=off -d guest_errors,int -D E:\eebbk9288s-qemu\build\bbk9288s-test\run-qmp-key-a-clean.log
+E:\eebbk9288s-qemu\build\qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -qmp tcp:127.0.0.1:$port,server=on,wait=off -d guest_errors,int -D E:\eebbk9288s-qemu\build\bbk9288s-test\run-qmp-key-a-clean.log
 ```
 
 Then send. For scan validation, hold key down briefly before sending key up;
@@ -348,7 +351,7 @@ one P0 column low from reset. This example models the current Up mapping
 (`P0.3`, mask `0x08`) and logs only compact P0/P1 scan state:
 
 ```powershell
-& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,trace-key-scan=on,debug-key-p0-low-mask=0x08 -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-keyscan-debugmask.log'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw,trace-key-scan=on,debug-key-p0-low-mask=0x08 -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-keyscan-debugmask.log'
 ```
 
 To set the USB interrupt factor after HALT for diagnostics:
@@ -356,14 +359,14 @@ To set the USB interrupt factor after HALT for diagnostics:
 ```powershell
 $env:CHERE_INVOKING = '1'
 $env:MSYSTEM = 'UCRT64'
-& 'C:\msys64\usr\bin\bash.exe' -lc 'cd /e/eebbk9288s-qemu && timeout 2s build/qemu-system-s1c33.exe -M bbk9288s,debug-usb-wakeup-ms=50 -cpu c33l05,exit-on-halt=off -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/wakeup-real.log'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'cd /e/eebbk9288s-qemu && timeout 2s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw,debug-usb-wakeup-ms=50 -cpu c33l05,exit-on-halt=off -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/wakeup-real.log'
 ```
 
 To trace interrupt-enable state changes:
 
 ```powershell
 $env:PATH='C:\msys64\ucrt64\bin;C:\msys64\usr\bin;' + $env:PATH
-E:\eebbk9288s-qemu\build\qemu-system-s1c33.exe -M bbk9288s -cpu c33l05,trace-psr=on -kernel E:\eebbk9288s-qemu\build\bbk9288s-test\kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D E:\eebbk9288s-qemu\build\bbk9288s-test\psr-trace.log
+E:\eebbk9288s-qemu\build\qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw -cpu c33l05,trace-psr=on -nographic -serial none -monitor none -d guest_errors,int -D E:\eebbk9288s-qemu\build\bbk9288s-test\psr-trace.log
 ```
 
 Verified result with the 9288S `kernel.bin`:

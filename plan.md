@@ -11,13 +11,14 @@
 
 用 QEMU 实现一个步步高 9288S 的可观察、可调试模拟器。
 
-当前阶段不追求一次性完整还原整机，而是让真实 `kernel.bin` 在稳定的设备骨架上运行，并把 CPU、MMIO、中断、触摸、LCD、存储等行为做成可追踪、可复现实验。每次推进都应留下日志证据，避免靠猜测硬凑。
+当前阶段不追求一次性完整还原整机，而是让真实 NAND 固件在稳定的设备骨架上运行，并把 CPU、MMIO、中断、触摸、LCD、存储等行为做成可追踪、可复现实验。每次推进都应留下日志证据，避免靠猜测硬凑。
 
 ## 项目和固件
 
 - 项目目录：`E:\eebbk9288s-qemu`
-- 原始固件：`D:\Downloads\步步高9288s系统文件\系统\kernel.bin`
-- 测试副本：`E:\eebbk9288s-qemu\build\bbk9288s-test\kernel.bin`
+- 运行固件：`E:\eebbk9288s-runtime\nand-user.raw`
+- 启动方式：板级加载器解析 NAND OOB/FTL 和 FAT16，直接读取其中的
+  `系统\kernel.bin`；正式启动不需要外置内核文件
 - 固件格式：`KNL 0100200608021118`
 - KNL header：`0x40` 字节
 - payload 加载地址：`0x02000000`
@@ -283,7 +284,11 @@ timer0 / 16-bit timer 可观察性：
 - 应用窗口回调动态记录确认六条实体输入线：`K5.3/K5.2/K5.1/K5.0` 分别产生上/下/左/右，`P0.5` 为确定，`P0.4` 为退出。主机映射为方向键、Enter/Space、Esc/Backspace。
 - 最终回归依次执行“上、左、确定、下、右、确定、退出”：光标移动、行动提交、关卡/得分变化和退出确认框均正常。
 - 最终截图：`build\bbk9288s-test\pirate-playable-fpt6-20260723-085131-key1-up.png`、`pirate-playable-fpt6-20260723-085131-key4-down.png`、`pirate-playable-fpt6-20260723-085131-key7-esc.png`。
-- 本地构建已启用 GTK/SDL；`run-bbk9288s.cmd` 首次创建独立 `nand-user.raw`，随后复用该镜像保存 guest 数据，并打开可交互窗口。
+- 本地构建已启用 GTK/SDL；`run-bbk9288s.cmd` 复用运行目录中的
+  `nand-user.raw` 保存 guest 数据，并打开可交互窗口。
+- 板级启动加载器现已扫描 NAND OOB FTL 映射、解析 FAT16 并递归查找
+  `kernel.bin`。无 `-kernel` 参数的实测已加载 2,523,332 字节 KNL 文件，
+  正确得到 `load=0x02000000`、`pc=0x0200468a`。
 
 ### Web 前端和局域网可玩闭环
 
@@ -1044,19 +1049,19 @@ git -C E:\eebbk9288s-qemu diff --check -- hw/s1c33/bbk9288s.c target/s1c33/cpu.c
 默认 smoke：
 
 ```powershell
-& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/run-default-timer16-metadata.log; timeout 4s build/qemu-system-s1c33.exe -M bbk9288s -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-default-timer16-metadata.log; printf "exit:%s\n" "$?"'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/run-default-timer16-metadata.log; timeout 4s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-default-timer16-metadata.log; printf "exit:%s\n" "$?"'
 ```
 
 Key scan 窄日志：
 
 ```powershell
-& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/run-keyscan-debugmask.log; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,trace-key-scan=on,debug-key-p0-low-mask=0x08 -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-keyscan-debugmask.log; printf "exit:%s\n" "$?"'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/run-keyscan-debugmask.log; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw,trace-key-scan=on,debug-key-p0-low-mask=0x08 -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-keyscan-debugmask.log; printf "exit:%s\n" "$?"'
 ```
 
 LCD headless PGM dump：
 
 ```powershell
-& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/lcd-dump.pgm build/bbk9288s-test/run-lcd-dump.log; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,debug-lcd-dump-ms=1000,debug-lcd-dump-path=build/bbk9288s-test/lcd-dump.pgm -cpu c33l05,exit-on-halt=off,trace-calls=on -kernel build/bbk9288s-test/kernel.bin -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-lcd-dump.log; printf "exit:%s\n" "$?"'
+& 'C:\msys64\usr\bin\bash.exe' -lc 'export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /e/eebbk9288s-qemu; rm -f build/bbk9288s-test/lcd-dump.pgm build/bbk9288s-test/run-lcd-dump.log; timeout 3s build/qemu-system-s1c33.exe -M bbk9288s,nand-image=E:/eebbk9288s-runtime/nand-user.raw,debug-lcd-dump-ms=1000,debug-lcd-dump-path=build/bbk9288s-test/lcd-dump.pgm -cpu c33l05,exit-on-halt=off,trace-calls=on -nographic -serial none -monitor none -d guest_errors,int -D build/bbk9288s-test/run-lcd-dump.log; printf "exit:%s\n" "$?"'
 ```
 
 ## 当前保留日志

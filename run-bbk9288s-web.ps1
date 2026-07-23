@@ -36,7 +36,6 @@ if (-not $RuntimeDir) {
     }
 }
 $RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
-$kernel = Join-Path $RuntimeDir "kernel.bin"
 $userNand = Join-Path $RuntimeDir "nand-user.raw"
 $nandTool = Join-Path $root "scripts\bbk9288s_nand_image.py"
 $webServer = Join-Path $root "scripts\bbk9288s_web_server.py"
@@ -44,7 +43,7 @@ $webRoot = Join-Path $root "web"
 $webDist = Join-Path $webRoot "dist"
 $python = (Get-Command python -ErrorAction Stop).Source
 
-foreach ($path in @($qemu, $kernel, $userNand, $nandTool, $webServer)) {
+foreach ($path in @($qemu, $userNand, $nandTool, $webServer)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required emulator file is missing: $path"
     }
@@ -112,7 +111,6 @@ try {
         --root $root `
         --runtime-dir $RuntimeDir `
         --qemu $qemu `
-        --kernel $kernel `
         --nand $userNand `
         --dist $webDist `
         --http-port $HttpPort `

@@ -17,10 +17,9 @@ if (-not $RuntimeDir) {
     }
 }
 $RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
-$kernel = Join-Path $RuntimeDir "kernel.bin"
 $userNand = Join-Path $RuntimeDir "nand-user.raw"
 
-foreach ($path in @($qemu, $kernel, $userNand)) {
+foreach ($path in @($qemu, $userNand)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required emulator file is missing: $path"
     }
@@ -40,7 +39,6 @@ try {
         -name "BBK 9288S Emulator" `
         -machine "bbk9288s,nand-image=$($userNand.Replace('\', '/'))" `
         -cpu "c33l05,exit-on-halt=off" `
-        -kernel $kernel `
         -rtc "base=localtime" `
         -display $displayOptions `
         -serial none `

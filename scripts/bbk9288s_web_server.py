@@ -72,7 +72,6 @@ class QemuController:
         self,
         root: Path,
         executable: Path,
-        kernel: Path,
         nand: Path,
         websocket_port: int,
         qmp_port: int,
@@ -80,7 +79,6 @@ class QemuController:
     ) -> None:
         self.root = root
         self.executable = executable
-        self.kernel = kernel
         self.nand = nand
         self.websocket_port = websocket_port
         self.qmp_port = qmp_port
@@ -113,8 +111,6 @@ class QemuController:
             f"bbk9288s,nand-image={self._relative(self.nand)}",
             "-cpu",
             "c33l05,exit-on-halt=off",
-            "-kernel",
-            self._relative(self.kernel),
             "-rtc",
             "base=localtime",
             "-display",
@@ -690,7 +686,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qmp-port", type=int, default=6082)
     parser.add_argument("--qemu", type=Path)
     parser.add_argument("--runtime-dir", type=Path)
-    parser.add_argument("--kernel", type=Path)
     parser.add_argument("--nand", type=Path)
     parser.add_argument("--flat", type=Path)
     parser.add_argument("--dist", type=Path)
@@ -721,7 +716,6 @@ def main() -> int:
         or (root / "qemu-system-s1c33.exe" if packaged else None)
         or root / "build/qemu-system-s1c33.exe"
     ).resolve()
-    kernel_path = (args.kernel or runtime_dir / "kernel.bin").resolve()
     nand_path = (args.nand or runtime_dir / "nand-user.raw").resolve()
     flat_path = (
         args.flat or runtime_dir / "nand-manager.fat.img"
@@ -729,14 +723,13 @@ def main() -> int:
     dist_path = (args.dist or root / "web/dist").resolve()
     log_path = runtime_dir / "web-qemu.stderr.log"
 
-    for path in (qemu_path, kernel_path, nand_path, dist_path):
+    for path in (qemu_path, nand_path, dist_path):
         if not path.exists():
             raise FileNotFoundError(f"required path is missing: {path}")
 
     qemu = QemuController(
         root,
         qemu_path,
-        kernel_path,
         nand_path,
         args.websocket_port,
         args.qmp_port,

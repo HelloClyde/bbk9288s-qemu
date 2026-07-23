@@ -36,7 +36,7 @@ Size: 276,824,064 bytes (256 MiB data plus 64-byte OOB per page)
 SHA-256: $rawHash
 
 This image is intended only for emulator testing. Back it up before modifying it.
-The firmware kernel.bin is a separate file and is not included in this archive.
+The board loader finds kernel.bin inside this NAND image at startup.
 "@
     Set-Content -LiteralPath (Join-Path $runtime "README.txt") `
         -Value $readme -Encoding utf8

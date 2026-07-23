@@ -20,6 +20,11 @@ Remove-Item -LiteralPath $archive, "$archive.sha256" `
     -NandPath $NandPath -ArchivePath $archive
 
 $repoArgs = if ($Repository) { @("--repo", $Repository) } else { @() }
+$releaseNotes = @"
+Persistent NAND image for emulator testing. The board loader reads kernel.bin
+directly from the FAT16 filesystem inside this image. Verify redistribution
+rights before replacing or publishing this asset.
+"@
 & gh auth status
 if ($LASTEXITCODE -ne 0) {
     throw "GitHub CLI authentication is required"
@@ -29,11 +34,19 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     & gh release create $Tag @repoArgs `
         --title "BBK 9288S test NAND image" `
-        --notes "Persistent NAND image for emulator testing. The firmware kernel is not included. Verify redistribution rights before replacing this asset." `
+        --notes $releaseNotes `
         --prerelease
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create NAND release"
     }
+}
+
+& gh release edit $Tag @repoArgs `
+    --title "BBK 9288S test NAND image" `
+    --notes $releaseNotes `
+    --prerelease
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to update NAND release notes"
 }
 
 & gh release upload $Tag $archive "$archive.sha256" @repoArgs --clobber

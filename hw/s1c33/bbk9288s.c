@@ -70,6 +70,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(BBK9288SMachineState, BBK9288S_MACHINE)
     (BBK9288S_NAND_PAGES_PER_BLOCK * BBK9288S_NAND_BLOCKS)
 #define BBK9288S_NAND_STORAGE_SIZE \
     ((size_t)BBK9288S_NAND_PAGE_COUNT * BBK9288S_NAND_RAW_PAGE_SIZE)
+#define BBK9288S_NAND_RAW_BLOCK_SIZE \
+    (BBK9288S_NAND_RAW_PAGE_SIZE * BBK9288S_NAND_PAGES_PER_BLOCK)
+#define BBK9288S_NAND_BLOCK_DATA_SIZE \
+    (BBK9288S_NAND_PAGE_SIZE * BBK9288S_NAND_PAGES_PER_BLOCK)
+#define BBK9288S_NAND_RESERVED_BLOCKS 40
+#define BBK9288S_NAND_LOGICAL_BLOCKS  1968
+#define BBK9288S_FAT_SECTOR_SIZE      512
+#define BBK9288S_FAT_MAX_DEPTH        8
+#define BBK9288S_FAT_CLUSTER_END      0xfff8
 #define BBK9288S_LCDC_IO_BASE   0x00380000u
 #define BBK9288S_LCDC_IO_SIZE   0x00010000u
 #define BBK9288S_IVRAM_BASE     0x003c0000u
@@ -3752,6 +3761,395 @@ static void bbk9288s_nand_storage_save(BBK9288SState *s)
                 s->nand_image_path, s->nand_storage_size);
 }
 
+typedef struct BBK9288SFatBoot {
+    BBK9288SState *machine;
+    uint16_t *block_map;
+    uint64_t fat_offset;
+    uint64_t root_offset;
+    uint64_t data_offset;
+    uint32_t root_entries;
+    uint32_t cluster_size;
+    uint32_t cluster_count;
+} BBK9288SFatBoot;
+
+static unsigned bbk9288s_nand_tag_parity(unsigned value)
+{
+    unsigned parity = 0;
+
+    while (value != 0) {
+        parity ^= value & 1;
+        value >>= 1;
+    }
+    return parity;
+}
+
+static bool bbk9288s_nand_block_tag(BBK9288SState *s,
+                                    unsigned physical_block,
+                                    uint16_t *result)
+{
+    uint16_t tags[8];
+    unsigned tag_count = 0;
+    unsigned best_count = 0;
+    unsigned best = 0;
+    unsigned page;
+    unsigned sector;
+    unsigned i;
+    unsigned j;
+
+    for (page = 0; page < 2; page++) {
+        size_t offset = (size_t)physical_block *
+                        BBK9288S_NAND_RAW_BLOCK_SIZE +
+                        page * BBK9288S_NAND_RAW_PAGE_SIZE +
+                        BBK9288S_NAND_PAGE_SIZE;
+        const uint8_t *oob = s->nand_storage + offset;
+
+        for (sector = 0; sector < 4; sector++) {
+            const uint8_t *slot = oob + sector * 16;
+            uint16_t first = lduw_le_p(slot + 6);
+            uint16_t second = lduw_le_p(slot + 11);
+
+            if (slot[1] == 0 && first != UINT16_MAX && first == second) {
+                tags[tag_count++] = first;
+            }
+        }
+    }
+
+    for (i = 0; i < tag_count; i++) {
+        unsigned count = 0;
+
+        for (j = 0; j < tag_count; j++) {
+            count += tags[j] == tags[i];
+        }
+        if (count > best_count) {
+            best = i;
+            best_count = count;
+        }
+    }
+    if (best_count == 0) {
+        return false;
+    }
+
+    *result = tags[best];
+    return true;
+}
+
+static uint16_t *bbk9288s_nand_build_block_map(BBK9288SState *s)
+{
+    uint16_t *map = g_new(uint16_t, BBK9288S_NAND_LOGICAL_BLOCKS);
+    unsigned physical;
+    unsigned logical;
+
+    for (logical = 0; logical < BBK9288S_NAND_LOGICAL_BLOCKS; logical++) {
+        map[logical] = UINT16_MAX;
+    }
+
+    for (physical = BBK9288S_NAND_RESERVED_BLOCKS;
+         physical < BBK9288S_NAND_BLOCKS; physical++) {
+        uint16_t tag;
+
+        if (!bbk9288s_nand_block_tag(s, physical, &tag)) {
+            continue;
+        }
+        logical = tag >> 1;
+        if (logical >= BBK9288S_NAND_LOGICAL_BLOCKS ||
+            (tag & 1) != bbk9288s_nand_tag_parity(logical)) {
+            continue;
+        }
+
+        /*
+         * The FTL appends replacement blocks. Scanning in physical order
+         * therefore selects the newest copy when a logical block is repeated.
+         */
+        map[logical] = physical;
+    }
+    return map;
+}
+
+static bool bbk9288s_nand_read_logical(BBK9288SState *s,
+                                       const uint16_t *map,
+                                       uint64_t offset,
+                                       void *buffer,
+                                       size_t length)
+{
+    uint8_t *out = buffer;
+    uint64_t flat_size = (uint64_t)BBK9288S_NAND_LOGICAL_BLOCKS *
+                         BBK9288S_NAND_BLOCK_DATA_SIZE;
+
+    if (offset > flat_size || length > flat_size - offset) {
+        return false;
+    }
+
+    while (length != 0) {
+        unsigned logical = offset / BBK9288S_NAND_BLOCK_DATA_SIZE;
+        size_t block_offset = offset % BBK9288S_NAND_BLOCK_DATA_SIZE;
+        unsigned page = block_offset / BBK9288S_NAND_PAGE_SIZE;
+        size_t page_offset = block_offset % BBK9288S_NAND_PAGE_SIZE;
+        size_t chunk = MIN(length,
+                           (size_t)BBK9288S_NAND_PAGE_SIZE - page_offset);
+        uint16_t physical = map[logical];
+        size_t raw_offset;
+
+        if (physical == UINT16_MAX) {
+            return false;
+        }
+        raw_offset = (size_t)physical * BBK9288S_NAND_RAW_BLOCK_SIZE +
+                     page * BBK9288S_NAND_RAW_PAGE_SIZE + page_offset;
+        memcpy(out, s->nand_storage + raw_offset, chunk);
+        out += chunk;
+        offset += chunk;
+        length -= chunk;
+    }
+    return true;
+}
+
+static bool bbk9288s_fat_boot_init(BBK9288SFatBoot *fat,
+                                   BBK9288SState *s,
+                                   uint16_t *map)
+{
+    uint8_t mbr[BBK9288S_FAT_SECTOR_SIZE];
+    uint8_t boot[BBK9288S_FAT_SECTOR_SIZE];
+    uint32_t partition_lba;
+    uint32_t total_sectors;
+    uint32_t reserved_sectors;
+    uint32_t fat_sectors;
+    uint32_t root_sectors;
+    uint32_t data_sectors;
+    uint8_t sectors_per_cluster;
+    uint8_t number_of_fats;
+
+    if (!bbk9288s_nand_read_logical(s, map, 0, mbr, sizeof(mbr)) ||
+        lduw_le_p(mbr + 510) != 0xaa55) {
+        return false;
+    }
+    partition_lba = ldl_le_p(mbr + 446 + 8);
+    if (!bbk9288s_nand_read_logical(
+            s, map, (uint64_t)partition_lba * BBK9288S_FAT_SECTOR_SIZE,
+            boot, sizeof(boot)) ||
+        lduw_le_p(boot + 510) != 0xaa55 ||
+        lduw_le_p(boot + 11) != BBK9288S_FAT_SECTOR_SIZE) {
+        return false;
+    }
+
+    sectors_per_cluster = boot[13];
+    reserved_sectors = lduw_le_p(boot + 14);
+    number_of_fats = boot[16];
+    fat->root_entries = lduw_le_p(boot + 17);
+    total_sectors = lduw_le_p(boot + 19);
+    if (total_sectors == 0) {
+        total_sectors = ldl_le_p(boot + 32);
+    }
+    fat_sectors = lduw_le_p(boot + 22);
+    if (sectors_per_cluster == 0 || reserved_sectors == 0 ||
+        number_of_fats == 0 || fat->root_entries == 0 ||
+        total_sectors == 0 || fat_sectors == 0) {
+        return false;
+    }
+
+    root_sectors =
+        (fat->root_entries * 32 + BBK9288S_FAT_SECTOR_SIZE - 1) /
+        BBK9288S_FAT_SECTOR_SIZE;
+    if (total_sectors <= reserved_sectors +
+                         number_of_fats * fat_sectors + root_sectors) {
+        return false;
+    }
+    data_sectors = total_sectors - reserved_sectors -
+                   number_of_fats * fat_sectors - root_sectors;
+
+    fat->machine = s;
+    fat->block_map = map;
+    fat->fat_offset =
+        ((uint64_t)partition_lba + reserved_sectors) *
+        BBK9288S_FAT_SECTOR_SIZE;
+    fat->root_offset =
+        fat->fat_offset +
+        (uint64_t)number_of_fats * fat_sectors * BBK9288S_FAT_SECTOR_SIZE;
+    fat->data_offset =
+        fat->root_offset + (uint64_t)root_sectors * BBK9288S_FAT_SECTOR_SIZE;
+    fat->cluster_size =
+        sectors_per_cluster * BBK9288S_FAT_SECTOR_SIZE;
+    fat->cluster_count = data_sectors / sectors_per_cluster;
+    return fat->cluster_count != 0;
+}
+
+static uint16_t bbk9288s_fat_next_cluster(BBK9288SFatBoot *fat,
+                                          uint16_t cluster)
+{
+    uint8_t entry[2];
+
+    if (!bbk9288s_nand_read_logical(
+            fat->machine, fat->block_map,
+            fat->fat_offset + (uint64_t)cluster * sizeof(entry),
+            entry, sizeof(entry))) {
+        return UINT16_MAX;
+    }
+    return lduw_le_p(entry);
+}
+
+static bool bbk9288s_fat_kernel_name(const uint8_t *entry)
+{
+    static const char short_name[11] = "KERNEL  BIN";
+    unsigned i;
+
+    for (i = 0; i < sizeof(short_name); i++) {
+        if (g_ascii_toupper(entry[i]) != short_name[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool bbk9288s_fat_find_kernel(BBK9288SFatBoot *fat,
+                                     bool root,
+                                     uint16_t first_cluster,
+                                     unsigned depth,
+                                     uint16_t *kernel_cluster,
+                                     uint32_t *kernel_size)
+{
+    uint16_t cluster = first_cluster;
+    uint32_t chain_length = 0;
+
+    if (depth > BBK9288S_FAT_MAX_DEPTH) {
+        return false;
+    }
+
+    do {
+        uint64_t offset;
+        uint32_t entries;
+        uint32_t i;
+
+        if (root) {
+            offset = fat->root_offset;
+            entries = fat->root_entries;
+        } else {
+            if (cluster < 2 ||
+                cluster >= fat->cluster_count + 2 ||
+                chain_length++ >= fat->cluster_count) {
+                return false;
+            }
+            offset = fat->data_offset +
+                     (uint64_t)(cluster - 2) * fat->cluster_size;
+            entries = fat->cluster_size / 32;
+        }
+
+        for (i = 0; i < entries; i++) {
+            uint8_t entry[32];
+            uint8_t attributes;
+            uint16_t entry_cluster;
+
+            if (!bbk9288s_nand_read_logical(
+                    fat->machine, fat->block_map, offset + i * sizeof(entry),
+                    entry, sizeof(entry))) {
+                return false;
+            }
+            if (entry[0] == 0) {
+                return false;
+            }
+            if (entry[0] == 0xe5) {
+                continue;
+            }
+
+            attributes = entry[11];
+            if (attributes == 0x0f || (attributes & 0x08) != 0) {
+                continue;
+            }
+            entry_cluster = lduw_le_p(entry + 26);
+
+            if ((attributes & 0x10) == 0 &&
+                bbk9288s_fat_kernel_name(entry)) {
+                *kernel_cluster = entry_cluster;
+                *kernel_size = ldl_le_p(entry + 28);
+                return *kernel_cluster >= 2 && *kernel_size != 0;
+            }
+            if ((attributes & 0x10) != 0 && entry[0] != '.' &&
+                bbk9288s_fat_find_kernel(
+                    fat, false, entry_cluster, depth + 1,
+                    kernel_cluster, kernel_size)) {
+                return true;
+            }
+        }
+
+        if (root) {
+            break;
+        }
+        cluster = bbk9288s_fat_next_cluster(fat, cluster);
+    } while (cluster < BBK9288S_FAT_CLUSTER_END);
+
+    return false;
+}
+
+static uint8_t *bbk9288s_fat_read_file(BBK9288SFatBoot *fat,
+                                       uint16_t cluster,
+                                       uint32_t size)
+{
+    uint8_t *data = g_malloc(size);
+    uint8_t *out = data;
+    uint32_t remaining = size;
+    uint32_t chain_length = 0;
+
+    while (remaining != 0) {
+        size_t chunk;
+        uint64_t offset;
+
+        if (cluster < 2 || cluster >= fat->cluster_count + 2 ||
+            chain_length++ >= fat->cluster_count) {
+            g_free(data);
+            return NULL;
+        }
+        chunk = MIN(remaining, fat->cluster_size);
+        offset = fat->data_offset +
+                 (uint64_t)(cluster - 2) * fat->cluster_size;
+        if (!bbk9288s_nand_read_logical(
+                fat->machine, fat->block_map, offset, out, chunk)) {
+            g_free(data);
+            return NULL;
+        }
+        out += chunk;
+        remaining -= chunk;
+        if (remaining != 0) {
+            cluster = bbk9288s_fat_next_cluster(fat, cluster);
+            if (cluster >= BBK9288S_FAT_CLUSTER_END) {
+                g_free(data);
+                return NULL;
+            }
+        }
+    }
+    return data;
+}
+
+static uint8_t *bbk9288s_nand_extract_kernel(BBK9288SState *s,
+                                             gsize *length,
+                                             uint64_t ram_size)
+{
+    g_autofree uint16_t *map = NULL;
+    BBK9288SFatBoot fat = { 0 };
+    uint16_t cluster;
+    uint32_t size;
+    uint8_t *data;
+
+    if (s->nand_image_path == NULL) {
+        return NULL;
+    }
+    map = bbk9288s_nand_build_block_map(s);
+    if (!bbk9288s_fat_boot_init(&fat, s, map) ||
+        !bbk9288s_fat_find_kernel(
+            &fat, true, 0, 0, &cluster, &size)) {
+        return NULL;
+    }
+    if (size < BBK9288S_KERNEL_HEADER ||
+        size - BBK9288S_KERNEL_HEADER > ram_size) {
+        return NULL;
+    }
+
+    data = bbk9288s_fat_read_file(&fat, cluster, size);
+    if (data == NULL) {
+        return NULL;
+    }
+    *length = size;
+    info_report("BBK9288S boot: loaded kernel.bin from NAND FAT16 "
+                "(cluster=%u size=%u)", cluster, size);
+    return data;
+}
+
 static void bbk9288s_touch_io_reset(BBK9288SState *s)
 {
     memset(s->touch_io_regs, 0, sizeof(s->touch_io_regs));
@@ -4531,9 +4929,9 @@ static void bbk9288s_lcdc_io_reset(BBK9288SState *s)
     memset(s->lcdc_seen, 0, sizeof(s->lcdc_seen));
 
     /*
-     * Direct KNL loading bypasses any board loader that may have initialized
-     * the panel. Seed the panel geometry so firmware LCD helper code sees the
-     * 9288S's 160x240 screen while later guest writes can still override it.
+     * The board loader starts the KNL image directly without running the
+     * original boot ROM. Seed the panel geometry so firmware LCD helper code
+     * sees the 9288S's 160x240 screen while guest writes can still override it.
      */
     s->lcdc_regs[BBK9288S_LCDC_HSIZE] = hsize & 0xff;
     s->lcdc_regs[BBK9288S_LCDC_HSIZE + 1] = hsize >> 8;
@@ -4560,29 +4958,23 @@ static uint32_t bbk9288s_first_vector(const uint8_t *payload,
     return BBK9288S_SDRAM_BASE;
 }
 
-static void bbk9288s_load_kernel(S1C33CPU *cpu, const char *filename,
-                                 uint64_t ram_size)
+static void bbk9288s_load_kernel_data(S1C33CPU *cpu,
+                                      const uint8_t *data,
+                                      gsize len,
+                                      const char *source,
+                                      uint64_t ram_size)
 {
-    g_autofree gchar *data = NULL;
-    gsize len = 0;
     uint32_t body_size;
     uint32_t pc;
-    GError *gerr = NULL;
-
-    if (!g_file_get_contents(filename, &data, &len, &gerr)) {
-        error_report("could not load kernel '%s': %s", filename, gerr->message);
-        g_error_free(gerr);
-        exit(1);
-    }
 
     if (len < BBK9288S_KERNEL_HEADER || memcmp(data, "KNL ", 4) != 0) {
-        error_report("kernel '%s' is not a BBK 9288S KNL image", filename);
+        error_report("kernel from %s is not a BBK 9288S KNL image", source);
         exit(1);
     }
 
-    body_size = ldl_le_p((uint8_t *)data + 0x14);
+    body_size = ldl_le_p(data + 0x14);
     if (body_size > len - BBK9288S_KERNEL_HEADER) {
-        error_report("kernel '%s' has invalid body size 0x%x", filename,
+        error_report("kernel from %s has invalid body size 0x%x", source,
                      body_size);
         exit(1);
     }
@@ -4593,9 +4985,9 @@ static void bbk9288s_load_kernel(S1C33CPU *cpu, const char *filename,
     }
 
     rom_add_blob_fixed("bbk9288s.kernel",
-                       (uint8_t *)data + BBK9288S_KERNEL_HEADER,
+                       data + BBK9288S_KERNEL_HEADER,
                        body_size, BBK9288S_SDRAM_BASE);
-    pc = bbk9288s_first_vector((uint8_t *)data + BBK9288S_KERNEL_HEADER,
+    pc = bbk9288s_first_vector(data + BBK9288S_KERNEL_HEADER,
                                body_size);
     cpu_set_pc(CPU(cpu), pc);
 
@@ -4603,11 +4995,30 @@ static void bbk9288s_load_kernel(S1C33CPU *cpu, const char *filename,
                 data + 4, body_size, BBK9288S_SDRAM_BASE, pc);
 }
 
+static void bbk9288s_load_kernel_file(S1C33CPU *cpu,
+                                      const char *filename,
+                                      uint64_t ram_size)
+{
+    g_autofree gchar *data = NULL;
+    gsize len = 0;
+    GError *gerr = NULL;
+
+    if (!g_file_get_contents(filename, &data, &len, &gerr)) {
+        error_report("could not load kernel '%s': %s", filename, gerr->message);
+        g_error_free(gerr);
+        exit(1);
+    }
+    bbk9288s_load_kernel_data(cpu, (const uint8_t *)data, len,
+                              filename, ram_size);
+}
+
 static void bbk9288s_init(MachineState *machine)
 {
     BBK9288SMachineState *bms = BBK9288S_MACHINE(machine);
     BBK9288SState *s = g_new0(BBK9288SState, 1);
     S1C33CPU *cpu;
+    g_autofree uint8_t *nand_kernel = NULL;
+    gsize nand_kernel_len = 0;
     MemoryRegion *sysmem = get_system_memory();
     MemoryRegion *iram = g_new(MemoryRegion, 1);
     const char *kernel = machine->kernel_filename ? machine->kernel_filename :
@@ -4680,12 +5091,19 @@ static void bbk9288s_init(MachineState *machine)
     cpu->env.sp = BBK9288S_BOOT_STACK_TOP;
     bbk9288s_set_ttbr(s, BBK9288S_SDRAM_BASE);
 
-    if (!kernel) {
-        warn_report("use -kernel path/to/kernel.bin to load a 9288S system");
-        return;
+    if (kernel) {
+        bbk9288s_load_kernel_file(cpu, kernel, machine->ram_size);
+    } else {
+        nand_kernel = bbk9288s_nand_extract_kernel(
+            s, &nand_kernel_len, machine->ram_size);
+        if (nand_kernel == NULL) {
+            error_report("BBK9288S NAND does not contain a readable "
+                         "FAT16 kernel.bin");
+            exit(1);
+        }
+        bbk9288s_load_kernel_data(cpu, nand_kernel, nand_kernel_len,
+                                  "NAND FAT16", machine->ram_size);
     }
-
-    bbk9288s_load_kernel(cpu, kernel, machine->ram_size);
 
     if (bms->debug_usb_wakeup_ms != 0) {
         s->debug_usb_wakeup_timer =
