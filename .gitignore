@@ -1,8 +1,16 @@
 /GNUmakefile
 /build/
+/_build/
+/dist/
+/release/
+/runtime/
+/web/dist/
+/web/node_modules/
 /.cache/
 /.vscode/
 *.pyc
+*.fat.img
+*.raw
 .sdk
 .stgit-*
 .git-submodule-status

@@ -398,6 +398,24 @@ F: hw/s390x/
 F: tests/tcg/s390x/
 L: qemu-s390x@nongnu.org
 
+S1C33 TCG CPU and BBK 9288S machine
+M: HelloClyde <HelloClyde@users.noreply.github.com>
+S: Maintained
+F: configs/devices/s1c33-softmmu/
+F: configs/targets/s1c33-softmmu.mak
+F: docs/assets/
+F: docs/technical-notes.md
+F: gdbstub/gdb-xml/s1c33-core.xml
+F: hw/s1c33/
+F: plan.md
+F: requirements-bbk9288s.txt
+F: run-bbk9288s*
+F: scripts/bbk9288s*
+F: scripts/package-bbk9288s*
+F: scripts/publish-bbk9288s*
+F: target/s1c33/
+F: web/
+
 SH4 TCG CPUs
 R: Yoshinori Sato <yoshinori.sato@nifty.com>
 S: Orphan

@@ -64,6 +64,7 @@ source or1k/Kconfig
 source ppc/Kconfig
 source riscv/Kconfig
 source rx/Kconfig
+source s1c33/Kconfig
 source s390x/Kconfig
 source sh4/Kconfig
 source sparc/Kconfig

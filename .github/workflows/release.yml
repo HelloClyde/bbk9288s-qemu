@@ -1,0 +1,139 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing or new release tag"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Preserve Unix line endings
+        run: git config --global core.autocrlf input
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up MSYS2
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            git
+            diffutils
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-libfdt
+
+      - name: Configure QEMU
+        shell: msys2 {0}
+        run: |
+          mkdir -p _build
+          cd _build
+          ../configure \
+            --target-list=s1c33-softmmu \
+            --without-default-features \
+            --enable-tcg \
+            --enable-vnc \
+            --enable-pixman \
+            --disable-werror \
+            --disable-docs \
+            --disable-tools
+
+      - name: Build QEMU
+        shell: msys2 {0}
+        working-directory: _build
+        run: ninja qemu-system-s1c33.exe
+
+      - name: Package Windows build
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "push") {
+            "${{ github.ref_name }}"
+          } else {
+            "${{ inputs.release_tag }}"
+          }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $name = "bbk9288s-qemu-$tag-windows-x64"
+          ./scripts/package-bbk9288s.ps1 `
+            -QemuPath "_build/qemu-system-s1c33.exe" `
+            -OutputDir "dist/$name" `
+            -ArchivePath "dist/$name.zip" `
+            -MsysBin "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          Get-FileHash "dist/$name.zip" -Algorithm SHA256 |
+            ForEach-Object {
+              "$($_.Hash.ToLowerInvariant())  $name.zip"
+            } | Set-Content "dist/$name.zip.sha256" -Encoding ascii
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bbk9288s-qemu-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: windows-x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bbk9288s-qemu-windows-x64
+          path: dist
+
+      - name: Include the test NAND asset when available
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download nand-test-image \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "bbk9288s-test-nand.zip*" \
+            --dir dist || true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+          generate_release_notes: true
+          prerelease: ${{ github.event_name == 'workflow_dispatch' }}
+          files: |
+            dist/*.zip
+            dist/*.sha256

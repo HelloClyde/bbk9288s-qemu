@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f4f5f6" />
+    <title>BBK 9288S Emulator</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="identity">
+          <span class="model-mark">9288S</span>
+          <div>
+            <h1>BBK 9288S</h1>
+            <p>QEMU hardware emulator</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="connection-state" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="status-text">正在连接</span>
+          </div>
+          <button class="icon-button" id="reconnect" type="button" title="重新连接" aria-label="重新连接">
+            <i data-lucide="refresh-cw"></i>
+          </button>
+          <button class="icon-button" id="fullscreen" type="button" title="全屏" aria-label="全屏">
+            <i data-lucide="maximize-2"></i>
+          </button>
+        </div>
+      </header>
+
+      <nav class="view-tabs" aria-label="主视图">
+        <button class="view-tab is-active" type="button" data-view="emulator" aria-selected="true">
+          <i data-lucide="monitor"></i>
+          <span>模拟器</span>
+        </button>
+        <button class="view-tab" type="button" data-view="files" aria-selected="false">
+          <i data-lucide="hard-drive"></i>
+          <span>NAND 文件</span>
+        </button>
+      </nav>
+
+      <main class="workspace" id="emulator-view" data-view-panel="emulator">
+        <section class="display-column" aria-label="9288S 显示屏">
+          <div class="device-frame" id="device-frame">
+            <div class="device-label">
+              <span>BBK</span>
+              <span>4 GRAY LCD</span>
+            </div>
+            <div class="screen-bezel">
+              <div id="screen" tabindex="0" aria-label="模拟器触摸屏">
+                <div class="screen-state" id="screen-state">连接模拟器</div>
+                <div class="touch-layer" id="touch-layer" aria-hidden="true"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="controls" aria-label="设备按键">
+          <div class="control-heading">
+            <span>DEVICE KEYS</span>
+            <span class="key-line">K5 / P0</span>
+          </div>
+
+          <div class="dpad" aria-label="方向键">
+            <button class="key key-up" type="button" data-key="up" title="上" aria-label="上">
+              <i data-lucide="chevron-up"></i>
+            </button>
+            <button class="key key-left" type="button" data-key="left" title="左" aria-label="左">
+              <i data-lucide="chevron-left"></i>
+            </button>
+            <span class="dpad-center" aria-hidden="true"></span>
+            <button class="key key-right" type="button" data-key="right" title="右" aria-label="右">
+              <i data-lucide="chevron-right"></i>
+            </button>
+            <button class="key key-down" type="button" data-key="down" title="下" aria-label="下">
+              <i data-lucide="chevron-down"></i>
+            </button>
+          </div>
+
+          <div class="action-keys">
+            <button class="action-key exit-key" type="button" data-key="escape">
+              <i data-lucide="corner-up-left"></i>
+              <span>退出</span>
+              <kbd>Esc</kbd>
+            </button>
+            <button class="action-key confirm-key" type="button" data-key="enter">
+              <i data-lucide="circle-check"></i>
+              <span>确定</span>
+              <kbd>Enter</kbd>
+            </button>
+          </div>
+
+          <div class="hardware-state">
+            <div><span>Display</span><strong>160 x 240</strong></div>
+            <div><span>Depth</span><strong>2 bpp</strong></div>
+            <div><span>Input</span><strong>Touch + keys</strong></div>
+          </div>
+        </aside>
+      </main>
+
+      <main class="file-view" id="files-view" data-view-panel="files" hidden>
+        <header class="file-toolbar">
+          <div class="file-location">
+            <span class="file-volume">NAND-A</span>
+            <nav class="breadcrumbs" id="breadcrumbs" aria-label="NAND 路径"></nav>
+          </div>
+          <div class="file-actions" id="file-actions" hidden>
+            <button class="icon-button" id="file-refresh" type="button" title="刷新" aria-label="刷新">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+            <button class="icon-button" id="new-folder" type="button" title="新建目录" aria-label="新建目录">
+              <i data-lucide="folder-plus"></i>
+            </button>
+            <button class="command-button" id="upload-file" type="button">
+              <i data-lucide="upload"></i>
+              <span>上传</span>
+            </button>
+            <button class="command-button secondary-command" id="discard-nand" type="button">
+              <i data-lucide="undo-2"></i>
+              <span>放弃</span>
+            </button>
+            <button class="command-button primary-command" id="apply-nand" type="button">
+              <i data-lucide="save"></i>
+              <span>应用并重启</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="operation-state" id="operation-state" hidden role="status" aria-live="polite">
+          <span class="operation-spinner" aria-hidden="true"></span>
+          <span id="operation-text">正在处理</span>
+        </div>
+
+        <section class="maintenance-gate" id="maintenance-gate">
+          <div class="gate-symbol" aria-hidden="true">
+            <i data-lucide="hard-drive"></i>
+          </div>
+          <h2>NAND 正由模拟器使用</h2>
+          <p>进入维护模式会正常停止 QEMU，并从原始 NAND 提取可编辑文件系统。</p>
+          <div class="gate-actions">
+            <button class="command-button primary-command" id="open-nand" type="button">
+              <i data-lucide="folder-open"></i>
+              <span>进入维护模式</span>
+            </button>
+            <button class="command-button secondary-command" id="restart-emulator" type="button">
+              <i data-lucide="power"></i>
+              <span>重启模拟器</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="file-browser" id="file-browser" hidden aria-label="NAND 文件">
+          <div class="capacity-row">
+            <div>
+              <strong id="capacity-used">0 B 已用</strong>
+              <span id="capacity-free">0 B 可用</span>
+            </div>
+            <progress id="capacity-progress" value="0" max="100">0%</progress>
+            <span class="change-state" id="change-state">未修改</span>
+          </div>
+
+          <div class="file-table-wrap">
+            <table class="file-table">
+              <thead>
+                <tr>
+                  <th scope="col">名称</th>
+                  <th scope="col">大小</th>
+                  <th scope="col">修改时间</th>
+                  <th scope="col"><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="file-list"></tbody>
+            </table>
+            <div class="empty-state" id="empty-state" hidden>
+              <i data-lucide="folder-open"></i>
+              <span>此目录为空</span>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <input id="file-input" type="file" multiple hidden />
+
+      <dialog class="manager-dialog" id="name-dialog">
+        <form method="dialog" id="name-form">
+          <header>
+            <h2 id="name-dialog-title">新建目录</h2>
+            <button class="icon-button" value="cancel" formmethod="dialog" title="关闭" aria-label="关闭">
+              <i data-lucide="x"></i>
+            </button>
+          </header>
+          <label for="name-input">名称</label>
+          <input id="name-input" name="name" type="text" maxlength="120" autocomplete="off" required />
+          <footer>
+            <button class="command-button secondary-command" value="cancel" formmethod="dialog">取消</button>
+            <button class="command-button primary-command" id="name-submit" value="default">确定</button>
+          </footer>
+        </form>
+      </dialog>
+
+      <dialog class="manager-dialog" id="confirm-dialog">
+        <form method="dialog" id="confirm-form">
+          <header>
+            <h2 id="confirm-title">确认操作</h2>
+          </header>
+          <p id="confirm-message"></p>
+          <footer>
+            <button class="command-button secondary-command" value="cancel">取消</button>
+            <button class="command-button danger-command" value="confirm">确认</button>
+          </footer>
+        </form>
+      </dialog>
+
+      <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
