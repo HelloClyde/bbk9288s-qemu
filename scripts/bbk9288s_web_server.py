@@ -85,6 +85,7 @@ class QemuController:
         self.log_path = log_path
         self.process: subprocess.Popen[bytes] | None = None
         self._log: BinaryIO | None = None
+        self._log_start = 0
 
     @property
     def running(self) -> bool:
@@ -102,6 +103,7 @@ class QemuController:
             return
         self._close_finished_process()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_start = self.log_path.stat().st_size if self.log_path.exists() else 0
         self._log = self.log_path.open("ab", buffering=0)
         args = [
             str(self.executable),
@@ -125,6 +127,9 @@ class QemuController:
             "-monitor",
             "none",
         ]
+        data_dir = self.root / "share"
+        if data_dir.is_dir():
+            args[1:1] = ["-L", self._relative(data_dir)]
         self.process = subprocess.Popen(
             args,
             cwd=self.root,
@@ -140,7 +145,12 @@ class QemuController:
             if self.process.poll() is not None:
                 code = self.process.returncode
                 self._close_finished_process()
-                raise RuntimeError(f"QEMU 启动失败，退出码 {code}")
+                message = f"QEMU 启动失败，退出码 {code}"
+                details = self._read_current_log()
+                if details:
+                    message += f"\nQEMU 错误：\n{details}"
+                message += f"\n完整日志：{self.log_path}"
+                raise RuntimeError(message)
             if not qmp_ready:
                 try:
                     with socket.create_connection(
@@ -163,6 +173,15 @@ class QemuController:
             time.sleep(0.1)
         self.stop()
         raise RuntimeError("QEMU 服务端口启动超时")
+
+    def _read_current_log(self) -> str:
+        try:
+            with self.log_path.open("rb") as log:
+                log.seek(self._log_start)
+                contents = log.read()
+        except OSError:
+            return ""
+        return contents[-16 * 1024 :].decode("utf-8", errors="replace").strip()
 
     def _read_qmp_response(self, stream: BinaryIO) -> dict:
         while True:

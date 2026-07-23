@@ -92,6 +92,8 @@ jobs:
             -OutputDir "dist/$name" `
             -ArchivePath "dist/$name.zip" `
             -MsysBin "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          ./scripts/smoke-test-bbk9288s-package.ps1 `
+            -PackageDir "dist/$name"
           Get-FileHash "dist/$name.zip" -Algorithm SHA256 |
             ForEach-Object {
               "$($_.Hash.ToLowerInvariant())  $name.zip"
