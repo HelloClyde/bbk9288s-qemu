@@ -771,6 +771,27 @@ static void gen_class4_shift(DisasContext *ctx, uint16_t word)
     gen_clear_ext(ctx);
 }
 
+static void gen_class4_swap(DisasContext *ctx, uint16_t word)
+{
+    unsigned op1 = extract32(word, 10, 3);
+    unsigned rs = extract32(word, 4, 4);
+    unsigned rd = word & 0xf;
+
+    if (op1 == 4) {
+        tcg_gen_bswap32_i32(cpu_regs[rd], cpu_regs[rs]);
+    } else {
+        TCGv_i32 high = tcg_temp_new_i32();
+        TCGv_i32 low = tcg_temp_new_i32();
+
+        tcg_gen_shli_i32(high, cpu_regs[rs], 8);
+        tcg_gen_andi_i32(high, high, 0xff00ff00);
+        tcg_gen_shri_i32(low, cpu_regs[rs], 8);
+        tcg_gen_andi_i32(low, low, 0x00ff00ff);
+        tcg_gen_or_i32(cpu_regs[rd], high, low);
+    }
+    gen_clear_ext(ctx);
+}
+
 static void gen_class4_scan(DisasContext *ctx, uint16_t word)
 {
     unsigned op1 = extract32(word, 10, 3);
@@ -1380,6 +1401,10 @@ static void translate_one(DisasContext *ctx, uint16_t word)
     if (word >= 0x8800 && word <= 0x9dff &&
         extract32(word, 8, 2) <= 1) {
         gen_class4_shift(ctx, word);
+        return;
+    }
+    if ((word & 0xff00) == 0x9200 || (word & 0xff00) == 0x9a00) {
+        gen_class4_swap(ctx, word);
         return;
     }
     if (word >= 0x8a00 && word <= 0x8eff &&

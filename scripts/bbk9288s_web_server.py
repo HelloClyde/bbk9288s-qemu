@@ -34,6 +34,9 @@ from bbk9288s_nand_image import (
 MAX_JSON_BYTES = 64 * 1024
 MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 COPY_CHUNK_SIZE = 1024 * 1024
+AUDIO_CHUNK_SIZE = 16 * 1024
+AUDIO_POLL_SECONDS = 0.05
+AUDIO_IDLE_SECONDS = 0.75
 INVALID_NAME_CHARS = set('<>:"/\\|?*')
 
 
@@ -76,6 +79,7 @@ class QemuController:
         websocket_port: int,
         qmp_port: int,
         log_path: Path,
+        audio_stream_path: Path,
     ) -> None:
         self.root = root
         self.executable = executable
@@ -83,6 +87,7 @@ class QemuController:
         self.websocket_port = websocket_port
         self.qmp_port = qmp_port
         self.log_path = log_path
+        self.audio_stream_path = audio_stream_path
         self.process: subprocess.Popen[bytes] | None = None
         self._log: BinaryIO | None = None
         self._log_start = 0
@@ -110,7 +115,10 @@ class QemuController:
             "-name",
             "BBK 9288S Web",
             "-machine",
-            f"bbk9288s,nand-image={self._relative(self.nand)}",
+            (
+                f"bbk9288s,nand-image={self._relative(self.nand)},"
+                f"audio-stream={self._relative(self.audio_stream_path)}"
+            ),
             "-cpu",
             "c33l05,exit-on-halt=off",
             "-rtc",
@@ -308,6 +316,11 @@ class NandWorkspace:
                 "dirty": self.dirty,
                 "busy": self.busy,
                 "maxUploadBytes": MAX_UPLOAD_BYTES,
+                "audioBytes": (
+                    self.qemu.audio_stream_path.stat().st_size
+                    if self.qemu.audio_stream_path.exists()
+                    else 0
+                ),
             }
 
     def enter(self) -> dict:
@@ -577,10 +590,70 @@ class WebHandler(SimpleHTTPRequestHandler):
             HTTPStatus.INTERNAL_SERVER_ERROR,
         )
 
+    def _stream_audio(self, start_position: int) -> None:
+        if not self.workspace.qemu.running:
+            self._send_json(
+                {"error": "模拟器未运行"},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Cache-Control", "no-store, no-cache")
+        self.send_header("Accept-Ranges", "none")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        position = max(0, start_position)
+        stream_path = self.workspace.qemu.audio_stream_path
+        sent_data = False
+        last_data_at = time.monotonic()
+        try:
+            while self.workspace.qemu.running:
+                data = b""
+                try:
+                    size = stream_path.stat().st_size
+                    if size < position:
+                        position = 0
+                    if size > position:
+                        with stream_path.open("rb") as source:
+                            source.seek(position)
+                            data = source.read(
+                                min(AUDIO_CHUNK_SIZE, size - position)
+                            )
+                except FileNotFoundError:
+                    pass
+
+                if data:
+                    self.wfile.write(data)
+                    self.wfile.flush()
+                    position += len(data)
+                    sent_data = True
+                    last_data_at = time.monotonic()
+                    continue
+                if (
+                    sent_data
+                    and time.monotonic() - last_data_at >= AUDIO_IDLE_SECONDS
+                ):
+                    break
+                time.sleep(AUDIO_POLL_SECONDS)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         if parsed.path == "/api/status":
             self._send_json(self.workspace.status())
+            return
+        if parsed.path == "/api/audio/stream":
+            try:
+                start_position = int(
+                    parse_qs(parsed.query).get("offset", ["0"])[0]
+                )
+            except ValueError:
+                start_position = 0
+            self._stream_audio(start_position)
             return
         if parsed.path == "/api/nand/list":
             try:
@@ -741,6 +814,7 @@ def main() -> int:
     ).resolve()
     dist_path = (args.dist or root / "web/dist").resolve()
     log_path = runtime_dir / "web-qemu.stderr.log"
+    audio_stream_path = runtime_dir / "web-audio-stream.mp3"
 
     for path in (qemu_path, nand_path, dist_path):
         if not path.exists():
@@ -753,6 +827,7 @@ def main() -> int:
         args.websocket_port,
         args.qmp_port,
         log_path,
+        audio_stream_path,
     )
     workspace = NandWorkspace(nand_path, flat_path, qemu)
     handler = partial(WebHandler, directory=str(dist_path))

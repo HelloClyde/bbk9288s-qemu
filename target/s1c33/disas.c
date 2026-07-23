@@ -277,6 +277,12 @@ static const char *s1c33_name(uint16_t word, char *buf, size_t len)
         }
         return buf;
     }
+    if ((word & 0xff00) == 0x9200 || (word & 0xff00) == 0x9a00) {
+        snprintf(buf, len, "%s %%r%u, %%r%u",
+                 (word & 0xff00) == 0x9200 ? "swap" : "swaph",
+                 word & 0xf, extract32(word, 4, 4));
+        return buf;
+    }
     if (word >= 0x8a00 && word <= 0x8eff &&
         extract32(word, 8, 2) == 2 &&
         extract32(word, 10, 3) >= 2 &&

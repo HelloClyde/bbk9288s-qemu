@@ -21,6 +21,8 @@ import {
   Trash2,
   Undo2,
   Upload,
+  Volume2,
+  VolumeX,
   X,
   createIcons,
 } from "lucide";
@@ -48,6 +50,8 @@ const iconSet = {
   Trash2,
   Undo2,
   Upload,
+  Volume2,
+  VolumeX,
   X,
 };
 
@@ -66,6 +70,10 @@ const reconnectButton = document.querySelector("#reconnect");
 const fullscreenButton = document.querySelector("#fullscreen");
 const deviceFrame = document.querySelector("#device-frame");
 const touchLayer = document.querySelector("#touch-layer");
+const audioElement = document.querySelector("#audio-stream");
+const audioToggle = document.querySelector("#audio-toggle");
+const audioVolume = document.querySelector("#audio-volume");
+const audioVolumeValue = document.querySelector("#audio-volume-value");
 
 const keyMap = {
   up: { keysym: 0xff52, code: "ArrowUp" },
@@ -82,6 +90,101 @@ let rfb = null;
 let reconnectTimer = null;
 let manualDisconnect = false;
 let powerBusy = false;
+let audioEnabled = false;
+let audioReconnectTimer = null;
+
+const savedVolume = Number.parseFloat(
+  window.localStorage.getItem("bbk9288s.audioVolume") || "0.8",
+);
+audioElement.volume = Number.isFinite(savedVolume)
+  ? Math.min(1, Math.max(0, savedVolume))
+  : 0.8;
+audioVolume.value = String(audioElement.volume);
+
+function audioStreamUrl(offset) {
+  return `/api/audio/stream?offset=${offset}&session=${Date.now()}`;
+}
+
+function setAudioState() {
+  const muted = audioElement.muted || audioElement.volume === 0;
+  audioToggle.dataset.enabled = String(audioEnabled);
+  audioToggle.dataset.muted = String(muted);
+  audioToggle.title = !audioEnabled
+    ? "启用声音"
+    : muted
+      ? "取消静音"
+      : "静音";
+  audioToggle.setAttribute("aria-label", audioToggle.title);
+  audioVolumeValue.value = `${Math.round(audioElement.volume * 100)}%`;
+}
+
+async function openAudioStream() {
+  if (!audioEnabled) {
+    return;
+  }
+  window.clearTimeout(audioReconnectTimer);
+  try {
+    const status = await apiRequest("/api/status");
+    if (!audioEnabled) {
+      return;
+    }
+    const offset = Math.max(0, Number(status.audioBytes) || 0);
+    audioElement.pause();
+    audioElement.src = audioStreamUrl(offset);
+    audioElement.load();
+    const playing = audioElement.play();
+    if (playing) {
+      playing.catch((error) => {
+        if (error.name !== "AbortError") {
+          console.error("audio playback failed", error);
+        }
+      });
+    }
+  } catch (error) {
+    console.error("audio stream connection failed", error);
+    scheduleAudioReconnect();
+  }
+}
+
+function scheduleAudioReconnect() {
+  window.clearTimeout(audioReconnectTimer);
+  if (!audioEnabled) {
+    return;
+  }
+  audioReconnectTimer = window.setTimeout(openAudioStream, 1200);
+}
+
+audioToggle.addEventListener("click", () => {
+  if (!audioEnabled) {
+    audioEnabled = true;
+    audioElement.muted = false;
+    openAudioStream();
+  } else {
+    audioElement.muted = !audioElement.muted;
+    if (!audioElement.muted && audioElement.paused) {
+      openAudioStream();
+    }
+  }
+  setAudioState();
+});
+
+audioVolume.addEventListener("input", () => {
+  audioElement.volume = Number(audioVolume.value);
+  audioElement.muted = audioElement.volume === 0;
+  window.localStorage.setItem(
+    "bbk9288s.audioVolume",
+    String(audioElement.volume),
+  );
+  if (!audioEnabled && audioElement.volume > 0) {
+    audioEnabled = true;
+    openAudioStream();
+  }
+  setAudioState();
+});
+
+audioElement.addEventListener("ended", scheduleAudioReconnect);
+audioElement.addEventListener("error", scheduleAudioReconnect);
+setAudioState();
 
 function websocketUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -339,6 +442,7 @@ powerButton.addEventListener("click", async () => {
     setPowerState(status);
     showToast(wasRunning ? "设备已重启" : "设备已启动");
     connect();
+    openAudioStream();
   } catch (error) {
     console.error(error);
     setConnectionState("error", "启动失败");
@@ -365,6 +469,8 @@ document.addEventListener("fullscreenchange", () => {
 window.addEventListener("beforeunload", () => {
   manualDisconnect = true;
   rfb?.disconnect();
+  window.clearTimeout(audioReconnectTimer);
+  audioElement.pause();
 });
 
 connect();

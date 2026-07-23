@@ -95,6 +95,15 @@
             </button>
           </div>
 
+          <div class="audio-control">
+            <button class="icon-button audio-button" id="audio-toggle" type="button" title="启用声音" aria-label="启用声音" data-enabled="false" data-muted="false">
+              <i class="volume-on" data-lucide="volume-2"></i>
+              <i class="volume-off" data-lucide="volume-x"></i>
+            </button>
+            <input id="audio-volume" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="音量" />
+            <output id="audio-volume-value" for="audio-volume">80%</output>
+          </div>
+
           <div class="hardware-state">
             <div><span>Display</span><strong>160 x 240</strong></div>
             <div><span>Depth</span><strong>2 bpp</strong></div>
@@ -184,6 +193,7 @@
         </section>
       </main>
 
+      <audio id="audio-stream" preload="none"></audio>
       <input id="file-input" type="file" multiple hidden />
 
       <dialog class="manager-dialog" id="name-dialog">

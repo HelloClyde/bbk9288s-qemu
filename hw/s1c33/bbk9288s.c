@@ -47,6 +47,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(BBK9288SMachineState, BBK9288S_MACHINE)
 #define BBK9288S_TOUCH_CLK      0x80
 #define BBK9288S_TOUCH_MISO     0x10
 #define BBK9288S_TOUCH_MOSI     0x08
+#define BBK9288S_AUDIO_IO_BASE  0x003a0000u
+#define BBK9288S_AUDIO_IO_SIZE  0x00000010u
+#define BBK9288S_AUDIO_DATA_IN  0x0000
+#define BBK9288S_AUDIO_DATA_OUT 0x0002
+#define BBK9288S_AUDIO_CONTROL  0x0004
+#define BBK9288S_AUDIO_CONFIG   0x0008
+#define BBK9288S_AUDIO_STATUS   0x000a
+#define BBK9288S_AUDIO_READ_READY  0x04
+#define BBK9288S_AUDIO_WRITE_READY 0x10
+#define BBK9288S_AUDIO_STREAM_FLUSH_BYTES 512
 #define BBK9288S_NAND_DATA_BASE 0x04000000u
 #define BBK9288S_NAND_DATA_SIZE 0x00001000u
 #define BBK9288S_NAND_CE_SELECT 0x100
@@ -282,6 +292,7 @@ struct BBK9288SMachineState {
     uint32_t touch_k5_low_mask;
     char *debug_lcd_dump_path;
     char *nand_image_path;
+    char *audio_stream_path;
     bool touch_p0_low;
     bool debug_timer16_factors;
     bool trace_io;
@@ -349,6 +360,7 @@ typedef struct BBK9288SState {
     MemoryRegion io;
     MemoryRegion board_io;
     MemoryRegion touch_io;
+    MemoryRegion audio_io;
     MemoryRegion nand_io;
     MemoryRegion lcdc_io;
     MemoryRegion ivram;
@@ -360,6 +372,8 @@ typedef struct BBK9288SState {
     uint8_t board_regs[BBK9288S_BOARD_IO_SIZE];
     uint8_t board_seen[BBK9288S_BOARD_IO_SIZE];
     uint8_t touch_io_regs[BBK9288S_TOUCH_IO_SIZE];
+    uint8_t audio_regs[BBK9288S_AUDIO_IO_SIZE];
+    uint8_t audio_seen[BBK9288S_AUDIO_IO_SIZE];
     uint8_t board_data_latch_reads;
     bool board_data_latch_pending;
     uint8_t lcdc_regs[BBK9288S_LCDC_IO_SIZE];
@@ -413,6 +427,10 @@ typedef struct BBK9288SState {
     uint64_t nand_page_read_count;
     uint64_t nand_program_count;
     uint64_t nand_erase_count;
+    FILE *audio_stream;
+    char *audio_stream_path;
+    uint64_t audio_stream_bytes;
+    unsigned audio_flush_bytes;
     uint64_t hsdma_transfer_count[BBK9288S_HSDMA_CHANNELS];
     uint8_t adc_last_channel;
     uint8_t touch_fpt;
@@ -436,6 +454,7 @@ typedef struct BBK9288SState {
     QEMUTimer *timer2b_compare_timer;
     QEMUTimer *timer8_underflow_timer;
     QEMUTimer *clock_timer;
+    QEMUTimer *audio_flush_timer;
     uint8_t ctm_subsecond;
     Notifier exit;
 } BBK9288SState;
@@ -3344,6 +3363,9 @@ static void bbk9288s_io_reset(BBK9288SState *s)
     if (s->clock_timer != NULL) {
         timer_del(s->clock_timer);
     }
+    if (s->audio_flush_timer != NULL) {
+        timer_del(s->audio_flush_timer);
+    }
     for (i = 0; i < ARRAY_SIZE(bbk9288s_regs); i++) {
         const BBK9288SRegInfo *reg = &bbk9288s_regs[i];
 
@@ -3483,6 +3505,13 @@ static void bbk9288s_exit_notify(Notifier *notifier, void *data)
     if (bbk9288s_active_machine == s) {
         bbk9288s_active_machine = NULL;
     }
+    if (s->audio_stream != NULL) {
+        fflush(s->audio_stream);
+        fclose(s->audio_stream);
+        s->audio_stream = NULL;
+    }
+    g_free(s->audio_stream_path);
+    s->audio_stream_path = NULL;
     bbk9288s_nand_storage_save(s);
     g_free(s->nand_storage);
     s->nand_storage = NULL;
@@ -3700,6 +3729,165 @@ static const MemoryRegionOps bbk9288s_touch_io_ops = {
         .max_access_size = 4,
     },
 };
+
+static bool bbk9288s_audio_stream_selected(BBK9288SState *s)
+{
+    uint8_t select = s->touch_io_regs[BBK9288S_TOUCH_SERIAL];
+
+    /*
+     * The board latch uses bit 0 for the compressed-data chip select and
+     * bit 1 for the decoder control port. Both selects are active low.
+     */
+    return (select & 0x01) == 0 && (select & 0x02) != 0;
+}
+
+static void bbk9288s_audio_flush_cb(void *opaque)
+{
+    BBK9288SState *s = opaque;
+
+    if (s->audio_stream != NULL && s->audio_flush_bytes != 0) {
+        fflush(s->audio_stream);
+        s->audio_flush_bytes = 0;
+    }
+}
+
+static void bbk9288s_audio_stream_write(BBK9288SState *s, uint8_t value)
+{
+    if (s->audio_stream == NULL || !bbk9288s_audio_stream_selected(s)) {
+        return;
+    }
+
+    if (fputc(value, s->audio_stream) == EOF) {
+        warn_report("BBK9288S audio stream write failed: %s",
+                    strerror(errno));
+        if (s->audio_flush_timer != NULL) {
+            timer_del(s->audio_flush_timer);
+        }
+        fclose(s->audio_stream);
+        s->audio_stream = NULL;
+        return;
+    }
+
+    s->audio_stream_bytes++;
+    if (++s->audio_flush_bytes >= BBK9288S_AUDIO_STREAM_FLUSH_BYTES) {
+        fflush(s->audio_stream);
+        s->audio_flush_bytes = 0;
+        timer_del(s->audio_flush_timer);
+    } else {
+        timer_mod(s->audio_flush_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 50);
+    }
+    if (s->trace_io || s->audio_stream_bytes == 1 ||
+        (s->audio_stream_bytes & 0xffff) == 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "bbk9288s-audio: compressed stream byte=%" PRIu64
+                      " value=0x%02x select=0x%02x\n",
+                      s->audio_stream_bytes, value,
+                      s->touch_io_regs[BBK9288S_TOUCH_SERIAL]);
+    }
+}
+
+static void bbk9288s_audio_record(BBK9288SState *s, bool is_write,
+                                  hwaddr offset, uint64_t value,
+                                  unsigned size)
+{
+    uint8_t seen_mask = is_write ? 2 : 1;
+    bool first = (s->audio_seen[offset] & seen_mask) == 0;
+
+    if (first) {
+        s->audio_seen[offset] |= seen_mask;
+    }
+    if (first || s->trace_io) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "bbk9288s-audio: %s %s pc=0x%08x "
+                      "addr=0x%08" HWADDR_PRIx " size=%u value=0x%0*" PRIx64
+                      "\n",
+                      first ? "first" : "trace",
+                      is_write ? "write" : "read", bbk9288s_current_pc(),
+                      BBK9288S_AUDIO_IO_BASE + offset, size, size * 2, value);
+    }
+}
+
+static uint64_t bbk9288s_audio_io_read(void *opaque, hwaddr offset,
+                                      unsigned size)
+{
+    BBK9288SState *s = opaque;
+    uint64_t value = 0;
+    unsigned i;
+
+    if (offset + size > BBK9288S_AUDIO_IO_SIZE) {
+        return 0;
+    }
+    for (i = 0; i < size; i++) {
+        value |= (uint64_t)s->audio_regs[offset + i] << (i * 8);
+    }
+    bbk9288s_audio_record(s, false, offset, value, size);
+    return value;
+}
+
+static void bbk9288s_audio_io_write(void *opaque, hwaddr offset,
+                                   uint64_t value, unsigned size)
+{
+    BBK9288SState *s = opaque;
+    unsigned i;
+
+    if (offset + size > BBK9288S_AUDIO_IO_SIZE) {
+        return;
+    }
+    for (i = 0; i < size; i++) {
+        hwaddr byte_offset = offset + i;
+        uint8_t byte = value >> (i * 8);
+
+        if (byte_offset != BBK9288S_AUDIO_STATUS) {
+            s->audio_regs[byte_offset] = byte;
+        }
+    }
+    if (offset == BBK9288S_AUDIO_DATA_OUT) {
+        bbk9288s_audio_stream_write(s, value & 0xff);
+    }
+    bbk9288s_audio_record(s, true, offset, value, size);
+}
+
+static const MemoryRegionOps bbk9288s_audio_io_ops = {
+    .read = bbk9288s_audio_io_read,
+    .write = bbk9288s_audio_io_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+        .unaligned = true,
+    },
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
+
+static void bbk9288s_audio_init(BBK9288SState *s, const char *path)
+{
+    memset(s->audio_regs, 0, sizeof(s->audio_regs));
+    memset(s->audio_seen, 0, sizeof(s->audio_seen));
+    s->audio_regs[BBK9288S_AUDIO_STATUS] =
+        BBK9288S_AUDIO_READ_READY | BBK9288S_AUDIO_WRITE_READY;
+    s->audio_stream_path =
+        g_strdup(path != NULL && path[0] != 0 ? path : NULL);
+    s->audio_stream_bytes = 0;
+    s->audio_flush_bytes = 0;
+
+    if (s->audio_stream_path == NULL) {
+        info_report("BBK9288S audio stream output disabled");
+        return;
+    }
+    s->audio_stream = fopen(s->audio_stream_path, "wb");
+    if (s->audio_stream == NULL) {
+        warn_report("could not open BBK9288S audio stream '%s': %s",
+                    s->audio_stream_path, strerror(errno));
+        return;
+    }
+    s->audio_flush_timer =
+        timer_new_ms(QEMU_CLOCK_REALTIME, bbk9288s_audio_flush_cb, s);
+    info_report("BBK9288S audio stream: %s", s->audio_stream_path);
+}
 
 static void bbk9288s_nand_storage_init(BBK9288SState *s, const char *path)
 {
@@ -5044,6 +5232,7 @@ static void bbk9288s_init(MachineState *machine)
                  bms->debug_lcd_dump_path[0] != 0 ?
                  bms->debug_lcd_dump_path : "bbk9288s-lcd.pgm");
     bbk9288s_nand_storage_init(s, bms->nand_image_path);
+    bbk9288s_audio_init(s, bms->audio_stream_path);
 
     memory_region_init_ram(iram, NULL, "bbk9288s.iram", BBK9288S_IRAM_SIZE,
                            &error_fatal);
@@ -5055,6 +5244,10 @@ static void bbk9288s_init(MachineState *machine)
                            "bbk9288s.touch-io", BBK9288S_TOUCH_IO_SIZE);
     bbk9288s_touch_io_reset(s);
     memory_region_add_subregion(sysmem, BBK9288S_TOUCH_IO_BASE, &s->touch_io);
+    memory_region_init_io(&s->audio_io, NULL, &bbk9288s_audio_io_ops, s,
+                          "bbk9288s.audio-decoder",
+                          BBK9288S_AUDIO_IO_SIZE);
+    memory_region_add_subregion(sysmem, BBK9288S_AUDIO_IO_BASE, &s->audio_io);
     memory_region_init_io(&s->nand_io, NULL, &bbk9288s_nand_io_ops, s,
                           "bbk9288s.nand-data", BBK9288S_NAND_DATA_SIZE);
     memory_region_add_subregion(sysmem, BBK9288S_NAND_DATA_BASE, &s->nand_io);
@@ -5210,6 +5403,23 @@ static void bbk9288s_set_nand_image_path(Object *obj, const char *value,
         g_strdup(value != NULL && value[0] != 0 ? value : NULL);
 }
 
+static char *bbk9288s_get_audio_stream_path(Object *obj, Error **errp)
+{
+    const char *path = BBK9288S_MACHINE(obj)->audio_stream_path;
+
+    return g_strdup(path != NULL ? path : "");
+}
+
+static void bbk9288s_set_audio_stream_path(Object *obj, const char *value,
+                                           Error **errp)
+{
+    BBK9288SMachineState *bms = BBK9288S_MACHINE(obj);
+
+    g_free(bms->audio_stream_path);
+    bms->audio_stream_path =
+        g_strdup(value != NULL && value[0] != 0 ? value : NULL);
+}
+
 static bool bbk9288s_get_strict_board_io(Object *obj, Error **errp)
 {
     return BBK9288S_MACHINE(obj)->strict_board_io;
@@ -5256,6 +5466,7 @@ static void bbk9288s_machine_instance_init(Object *obj)
     bms->touch_k5_low_mask = 0;
     bms->debug_lcd_dump_path = g_strdup("bbk9288s-lcd.pgm");
     bms->nand_image_path = NULL;
+    bms->audio_stream_path = NULL;
     bms->touch_p0_low = true;
     bms->debug_timer16_factors = false;
     bms->trace_io = false;
@@ -5337,6 +5548,13 @@ static void bbk9288s_machine_instance_init(Object *obj)
     object_property_set_description(obj, "nand-image",
                                     "Persistent raw 256 MiB NAND image, "
                                     "including 64-byte OOB per 2 KiB page");
+    object_property_add_str(obj, "audio-stream",
+                            bbk9288s_get_audio_stream_path,
+                            bbk9288s_set_audio_stream_path);
+    object_property_set_description(obj, "audio-stream",
+                                    "Write the compressed audio stream "
+                                    "received by the board decoder to this "
+                                    "path");
     object_property_add_bool(obj, "trace-io",
                              bbk9288s_get_trace_io,
                              bbk9288s_set_trace_io);
@@ -5365,6 +5583,8 @@ static void bbk9288s_machine_instance_finalize(Object *obj)
     bms->debug_lcd_dump_path = NULL;
     g_free(bms->nand_image_path);
     bms->nand_image_path = NULL;
+    g_free(bms->audio_stream_path);
+    bms->audio_stream_path = NULL;
 }
 
 static void bbk9288s_machine_class_init(ObjectClass *oc, const void *data)

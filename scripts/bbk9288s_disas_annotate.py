@@ -390,6 +390,13 @@ def decode_normal(
                 decoded.text = f"{SHIFT_NAMES[op1]} {reg(word & 0xf)}, {reg((word >> 4) & 0xf)}"
             return decoded
 
+    if word & 0xFF00 in (0x9200, 0x9A00):
+        decoded.text = (
+            f"{'swap' if word & 0xFF00 == 0x9200 else 'swaph'} "
+            f"{reg(word & 0xf)}, {reg((word >> 4) & 0xf)}"
+        )
+        return decoded
+
     if 0x8A00 <= word <= 0x8EFF and ((word >> 8) & 0x3) == 2:
         op1 = (word >> 10) & 0x7
         if op1 in SCAN_NAMES:

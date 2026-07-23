@@ -74,6 +74,14 @@ Implemented pieces:
   at `0x00300020`. Bit 7 is the serial clock, bit 4 is MISO, and MOSI is driven
   through on-chip `P1D bit 3`. Commands `0x93/0x90` return Y and `0xd3` returns
   X as a 12-bit serial sample.
+- Board audio decoder bus mapped at `0x003a0000`. The firmware reads data at
+  `+0x00`, writes decoder commands or compressed bytes at `+0x02`, controls
+  the interface at `+0x04/+0x08`, and polls `+0x0a` bits `0x04/0x10` for
+  read/write readiness. Active-low board selects in `0x00300020` distinguish
+  control transactions from the compressed stream. The optional
+  `audio-stream` machine property writes only bytes received while the stream
+  select is active; the Web server forwards that hardware output to the
+  browser and never reads audio files from NAND.
 - Board-level Samsung-compatible NAND at `0x04000000`, identified as
   `EC DA 10 95`: 256 MiB data, 2 KiB pages, 64-byte OOB, 64 pages per block,
   and 2048 blocks. Read, program, erase, status, ID, CPU access, and HSDMA access
@@ -153,6 +161,7 @@ Implemented pieces:
   RETI, NOP, SLP, HALT, BRK, PSR bit set/clear forms, shift/rotate forms,
   scan0/scan1, `adc`/`sbc` with N/Z/V/C flags, and the NMI-path
   multiplier/divider instructions.
+- C33 `swap` and `swaph`, required by the firmware MP3 frame-header parser.
 - Diagnostic halt on the first unimplemented opcode, with CPU register state.
 - HALT/SLP diagnostics include the instruction PC, next PC, CPU state, and
   register dump.
@@ -162,8 +171,9 @@ Implemented pieces:
 The emulator is not a complete S1C33L05 peripheral implementation, but the
 current hardware model loads the real firmware, completes three-point touch
 calibration without guest-memory injection, mounts persistent NAND, renders the
-four-gray display, and runs the bundled Pirate Ship game with working direction,
-confirm, and exit controls.
+four-gray display, runs the bundled Pirate Ship game with working direction,
+confirm, and exit controls, and plays the International Phonetic Alphabet MP3
+samples through the browser.
 
 ## Build
 
@@ -218,6 +228,11 @@ QEMU when the firmware has powered the process off and performs a full QEMU
 restart when it is already running. The adjacent refresh button only reconnects
 the RFB display session. The frontend polls emulator status so an automatic
 power-off is shown as `已关机` instead of an indefinite reconnect state.
+
+The speaker button starts the browser audio stream after a user gesture, as
+required by browser autoplay policies. The model captures the compressed bytes
+sent by the firmware to the board decoder, the HTTP layer delimits each guest
+playback, and the browser performs the final MP3 decode and volume control.
 
 The `NAND 文件` tab provides directory browsing, capacity reporting, upload,
 download, new directory, rename, and recursive delete. Select

@@ -411,6 +411,47 @@ h1 {
   gap: 10px;
 }
 
+.audio-control {
+  display: grid;
+  min-height: 42px;
+  align-items: center;
+  grid-template-columns: 38px minmax(80px, 1fr) 38px;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.audio-button {
+  position: relative;
+}
+
+.audio-button[data-enabled="true"] {
+  color: var(--teal);
+}
+
+.audio-button .volume-off,
+.audio-button[data-muted="true"] .volume-on {
+  display: none;
+}
+
+.audio-button[data-muted="true"] .volume-off {
+  display: block;
+}
+
+#audio-volume {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--teal);
+  cursor: pointer;
+}
+
+#audio-volume-value {
+  color: var(--muted);
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  text-align: right;
+}
+
 .action-key {
   min-width: 0;
   min-height: 70px;
