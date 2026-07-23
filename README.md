@@ -120,8 +120,7 @@ pacman -S --needed base-devel git diffutils \
   mingw-w64-ucrt-x86_64-pixman \
   mingw-w64-ucrt-x86_64-zlib \
   mingw-w64-ucrt-x86_64-ninja \
-  mingw-w64-ucrt-x86_64-python \
-  mingw-w64-ucrt-x86_64-libfdt
+  mingw-w64-ucrt-x86_64-python
 ```
 
 从 PowerShell 配置和构建最小 Web 版本：
