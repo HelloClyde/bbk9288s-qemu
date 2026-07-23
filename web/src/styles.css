@@ -154,10 +154,29 @@ h1 {
   background: #eef0f1;
 }
 
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.power-button[data-running="true"] {
+  color: var(--teal);
+}
+
+.power-button.is-busy svg {
+  animation: power-pulse 900ms ease-in-out infinite alternate;
+}
+
 .icon-button svg {
   width: 18px;
   height: 18px;
   stroke-width: 2;
+}
+
+@keyframes power-pulse {
+  to {
+    opacity: 0.35;
+  }
 }
 
 .view-tabs {

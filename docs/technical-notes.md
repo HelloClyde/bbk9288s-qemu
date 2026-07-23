@@ -207,10 +207,17 @@ Python HTTP server and QEMU for access from another device.
 
 The LCD accepts mouse, pen, and touch input. The on-screen D-pad and
 confirm/exit controls send the same QEMU key events as the local keyboard. The
-frontend keeps short Web taps pressed for 180 ms so the original firmware's
-resistive-touch and key debounce paths can sample them. Input still travels as
-normal RFB pointer/key events through the QEMU GPIO and serial touch ADC models;
-there is no guest-memory injection or system hook.
+frontend keeps short touches pressed for 180 ms and short keys for 40 ms so the
+original firmware's debounce paths can sample them without making one key press
+span multiple system ticks. Input still travels as normal RFB pointer/key events
+through the QEMU GPIO and serial touch ADC models; there is no guest-memory
+injection or system hook.
+
+The Power button in the Web header calls the emulator lifecycle API. It starts
+QEMU when the firmware has powered the process off and performs a full QEMU
+restart when it is already running. The adjacent refresh button only reconnects
+the RFB display session. The frontend polls emulator status so an automatic
+power-off is shown as `已关机` instead of an indefinite reconnect state.
 
 The `NAND 文件` tab provides directory browsing, capacity reporting, upload,
 download, new directory, rename, and recursive delete. Select

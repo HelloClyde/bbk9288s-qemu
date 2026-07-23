@@ -61,6 +61,7 @@ const screen = document.querySelector("#screen");
 const screenState = document.querySelector("#screen-state");
 const statusText = document.querySelector("#status-text");
 const statusNode = document.querySelector(".connection-state");
+const powerButton = document.querySelector("#device-power");
 const reconnectButton = document.querySelector("#reconnect");
 const fullscreenButton = document.querySelector("#fullscreen");
 const deviceFrame = document.querySelector("#device-frame");
@@ -80,6 +81,7 @@ const minimumTouchHoldMs = 180;
 let rfb = null;
 let reconnectTimer = null;
 let manualDisconnect = false;
+let powerBusy = false;
 
 function websocketUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -99,6 +101,22 @@ function setConnectionState(state, text) {
   statusText.textContent = text;
   screenState.textContent = text;
   screenState.hidden = state === "connected";
+}
+
+function setPowerState(status) {
+  const maintenance = Boolean(status?.maintenance);
+  const running = Boolean(status?.emulatorRunning);
+  const label = maintenance
+    ? "NAND 维护中"
+    : running
+      ? "重启设备"
+      : "启动设备";
+
+  powerButton.title = powerBusy ? "正在启动设备" : label;
+  powerButton.setAttribute("aria-label", powerButton.title);
+  powerButton.disabled = powerBusy || maintenance;
+  powerButton.classList.toggle("is-busy", powerBusy);
+  powerButton.dataset.running = String(running);
 }
 
 function scheduleReconnect() {
@@ -297,6 +315,38 @@ reconnectButton.addEventListener("click", () => {
     rfb = null;
   }
   connect();
+});
+
+powerButton.addEventListener("click", async () => {
+  if (powerBusy) {
+    return;
+  }
+
+  const wasRunning = Boolean(managerStatus?.emulatorRunning);
+  powerBusy = true;
+  setPowerState();
+  window.clearTimeout(reconnectTimer);
+  manualDisconnect = true;
+  rfb?.disconnect();
+  rfb = null;
+  setConnectionState("connecting", "正在启动");
+
+  try {
+    const status = await apiRequest("/api/emulator/restart", {
+      method: "POST",
+    });
+    managerStatus = status;
+    setPowerState(status);
+    showToast(wasRunning ? "设备已重启" : "设备已启动");
+    connect();
+  } catch (error) {
+    console.error(error);
+    setConnectionState("error", "启动失败");
+    showToast(error.message || "设备启动失败", true);
+  } finally {
+    powerBusy = false;
+    setPowerState(managerStatus);
+  }
 });
 
 fullscreenButton.addEventListener("click", async () => {
@@ -623,6 +673,7 @@ async function openDirectory(path) {
 
 function renderManagerStatus(status) {
   managerStatus = status;
+  setPowerState(status);
   maintenanceGate.hidden = status.maintenance;
   fileBrowser.hidden = !status.maintenance;
   fileActions.hidden = !status.maintenance;
@@ -800,8 +851,27 @@ fileInput.addEventListener("change", async () => {
 });
 
 window.setInterval(() => {
-  if (!document.querySelector('[data-view="files"]').classList.contains("is-active")) {
+  if (document.querySelector('[data-view="files"]').classList.contains("is-active")) {
+    refreshManagerStatus(false);
     return;
   }
-  refreshManagerStatus(false);
+  apiRequest("/api/status")
+    .then((status) => {
+      managerStatus = status;
+      setPowerState(status);
+      if (!status.emulatorRunning && !status.maintenance && !powerBusy) {
+        setConnectionState("offline", "已关机");
+      }
+    })
+    .catch((error) => console.error(error));
 }, 3000);
+
+apiRequest("/api/status")
+  .then((status) => {
+    managerStatus = status;
+    setPowerState(status);
+    if (!status.emulatorRunning && !status.maintenance) {
+      setConnectionState("offline", "已关机");
+    }
+  })
+  .catch((error) => console.error(error));
