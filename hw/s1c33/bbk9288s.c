@@ -202,6 +202,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(BBK9288SMachineState, BBK9288S_MACHINE)
 #define BBK9288S_PRESCALER_CLOCK_SELECT 0x0181
 #define BBK9288S_PRESCALER_OSC1    0x01
 #define BBK9288S_OSC1_HZ           32768
+#define BBK9288S_OSC3_PLL_HZ        48000000
 #define BBK9288S_CLG_POWER_CTRL 0x0180
 #define BBK9288S_CLG_PRESCALER  0x0181
 #define BBK9288S_CLG_CLOCK_OPT  0x0190
@@ -2026,20 +2027,20 @@ static bool bbk9288s_timer2b_armed(BBK9288SState *s)
 static uint64_t bbk9288s_timer2b_period_ms(BBK9288SState *s)
 {
     static const uint16_t divisors[8] = {
-        4096, 1024, 256, 64, 16, 4, 2, 1,
+        1, 2, 4, 16, 64, 256, 1024, 4096,
     };
     uint16_t compare =
         bbk9288s_timer16_lduw(s, BBK9288S_16TM_COMPARE_B(2));
     uint8_t clock_ctrl =
         s->io_regs[BBK9288S_16TM_CLOCK_CTRL(2)];
     uint64_t cycles = (uint64_t)compare * divisors[clock_ctrl & 0x07];
+    uint64_t source_hz = BBK9288S_OSC3_PLL_HZ;
 
-    /* The 9288S selects OSC1 as the prescaler source for its system tick. */
     if ((s->io_regs[BBK9288S_PRESCALER_CLOCK_SELECT] &
-         BBK9288S_PRESCALER_OSC1) == 0) {
-        return 1;
+         BBK9288S_PRESCALER_OSC1) != 0) {
+        source_hz = BBK9288S_OSC1_HZ;
     }
-    return MAX(DIV_ROUND_UP(cycles * 1000, BBK9288S_OSC1_HZ), 1);
+    return MAX(DIV_ROUND_UP(cycles * 1000, source_hz), 1);
 }
 
 static void bbk9288s_timer2b_compare_cb(void *opaque)

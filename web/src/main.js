@@ -74,7 +74,7 @@ const keyMap = {
   enter: { keysym: 0xff0d, code: "Enter" },
   escape: { keysym: 0xff1b, code: "Escape" },
 };
-const minimumKeyHoldMs = 180;
+const minimumKeyHoldMs = 40;
 const minimumTouchHoldMs = 180;
 
 let rfb = null;

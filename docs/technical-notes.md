@@ -50,9 +50,10 @@ Implemented pieces:
   delivers vector `42`, with priority read from `0x40267` and a bring-up
   fallback to level `1` when the firmware leaves that priority field at zero.
 - 16-bit timer 2 comparison-B system tick. The firmware programs compare B to
-  `292` from the 32768 Hz OSC1 source; the model raises `FIR3 bit 2`, delivers
-  vector `38`, resets the counter, and repeats at about 8.9 ms. This drives the
-  firmware GUI tick and application `SetTimer` messages.
+  `292`, selects the 48 MHz OSC3/PLL source with `PSCDT0=0`, and selects
+  `/4096` with `P16TS2=7`. The model raises `FIR3 bit 2`, delivers vector `38`,
+  resets the counter, and repeats at about 24.9 ms. This drives the firmware
+  GUI tick and application `SetTimer` messages.
 - Minimal port input 4/5 wake sources. `FIR7/EIR7 bit 0x04` delivers vector
   `68`, with priority read from `0x4026C D2:0`; bit `0x08` delivers vector
   `69`, with priority read from `0x4026C D6:4`.
