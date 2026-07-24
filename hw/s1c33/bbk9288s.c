@@ -58,10 +58,20 @@ OBJECT_DECLARE_SIMPLE_TYPE(BBK9288SMachineState, BBK9288S_MACHINE)
 #define BBK9288S_AUDIO_READ_READY  0x04
 #define BBK9288S_AUDIO_WRITE_READY 0x10
 #define BBK9288S_AUDIO_STREAM_FLUSH_BYTES 512
-#define BBK9288S_AUDIO_FIFO_CAPACITY 2048
+#define BBK9288S_AUDIO_FIFO_CAPACITY (8 * KiB)
 #define BBK9288S_AUDIO_DREQ_BYTES 32
+#define BBK9288S_AUDIO_DREQ_GPIO_BIT 0x08
 #define BBK9288S_AUDIO_DEFAULT_BYTES_PER_SECOND 16000
 #define BBK9288S_AUDIO_STREAM_MAX_BYTES (32 * MiB)
+#define BBK9288S_AUDIO_SCI_WRITE 0x02
+#define BBK9288S_AUDIO_SCI_READ  0x03
+#define BBK9288S_AUDIO_SCI_MODE  0x00
+#define BBK9288S_AUDIO_SCI_DECODE_TIME 0x04
+#define BBK9288S_AUDIO_SCI_AUDATA 0x05
+#define BBK9288S_AUDIO_SCI_VOL   0x0b
+#define BBK9288S_AUDIO_SCI_MODE_RESET 0x0004
+#define BBK9288S_AUDIO_SCI_MODE_SDINEW 0x0800
+#define BBK9288S_AUDIO_DEFAULT_AUDATA 0xac45
 #define BBK9288S_NAND_DATA_BASE 0x04000000u
 #define BBK9288S_NAND_DATA_SIZE 0x00001000u
 #define BBK9288S_NAND_CE_SELECT 0x100
@@ -162,6 +172,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(BBK9288SMachineState, BBK9288S_MACHINE)
 #define BBK9288S_16TM3B_IRQ_BIT 0x40
 #define BBK9288S_16TM3B_VECTOR  42
 #define BBK9288S_16TM3B_WAKE_MS 10
+#define BBK9288S_16TM4B_IRQ_BIT 0x04
+#define BBK9288S_16TM4B_VECTOR  46
 #define BBK9288S_8TM0_3_VECTOR  53
 #define BBK9288S_8TM0_3_MASK    0x0f
 #define BBK9288S_8TM1_IRQ_BIT   0x02
@@ -443,6 +455,15 @@ typedef struct BBK9288SState {
     unsigned audio_candidate_frames;
     int64_t audio_fifo_updated_ns;
     uint64_t audio_drain_remainder;
+    uint64_t audio_decoded_ns;
+    uint64_t audio_decode_remainder;
+    uint8_t audio_dreq_bytes;
+    uint16_t audio_sci_regs[16];
+    uint8_t audio_sci_command;
+    uint8_t audio_sci_register;
+    uint8_t audio_sci_phase;
+    uint8_t audio_sci_read_data[2];
+    uint8_t audio_sci_read_pos;
     uint64_t hsdma_transfer_count[BBK9288S_HSDMA_CHANNELS];
     uint8_t adc_last_channel;
     uint8_t touch_fpt;
@@ -464,6 +485,7 @@ typedef struct BBK9288SState {
     QEMUTimer *timer3b_wakeup_timer;
     QEMUTimer *timer16_tick_timer;
     QEMUTimer *timer2b_compare_timer;
+    QEMUTimer *timer4b_compare_timer;
     QEMUTimer *timer8_underflow_timer;
     QEMUTimer *clock_timer;
     QEMUTimer *audio_flush_timer;
@@ -484,10 +506,15 @@ static void bbk9288s_timer16_tick_cb(void *opaque);
 static void bbk9288s_timer2b_update(BBK9288SState *s);
 static void bbk9288s_timer2b_compare_cb(void *opaque);
 static void bbk9288s_timer3b_update(BBK9288SState *s);
+static void bbk9288s_timer4b_update(BBK9288SState *s);
+static void bbk9288s_timer4b_compare_cb(void *opaque);
 static void bbk9288s_timer8_underflow_cb(void *opaque);
 static void bbk9288s_touch_serial_reset(BBK9288SState *s);
 static void bbk9288s_nand_reset(BBK9288SState *s);
 static void bbk9288s_nand_storage_save(BBK9288SState *s);
+static void bbk9288s_audio_select_update(BBK9288SState *s, uint8_t old,
+                                         uint8_t value);
+static bool bbk9288s_audio_dreq_ready(BBK9288SState *s);
 
 #define BBK9288S_16TM_REG(addr, name, mask) \
     { addr, name, "timer-16bit", mask, 0x00, BBK9288S_REG_NONE }
@@ -1034,6 +1061,10 @@ static bool bbk9288s_select_irq(BBK9288SState *s, uint8_t *vector,
         s->io_regs[BBK9288S_EIR3_16TM2_3] &
         s->io_regs[BBK9288S_FIR3_16TM2_3] &
         BBK9288S_16TM3B_IRQ_BIT;
+    uint8_t timer4b_active =
+        s->io_regs[BBK9288S_EIR4_16TM4_5] &
+        s->io_regs[BBK9288S_FIR4_16TM4_5] &
+        BBK9288S_16TM4B_IRQ_BIT;
     uint8_t timer8_active =
         s->io_regs[BBK9288S_EIR5_8TM0_3] &
         s->io_regs[BBK9288S_FIR5_8TM0_3] &
@@ -1125,6 +1156,13 @@ static bool bbk9288s_select_irq(BBK9288SState *s, uint8_t *vector,
         *level = bbk9288s_irq_level_or_one(
             (s->io_regs[BBK9288S_PIR3_16TM2_3] >> 4) & 0x07);
         *name = "16tm3-b";
+        return true;
+    }
+    if (timer4b_active != 0) {
+        *vector = BBK9288S_16TM4B_VECTOR;
+        *level = bbk9288s_irq_level_or_one(
+            s->io_regs[BBK9288S_PIR4_16TM4_5] & 0x07);
+        *name = "16tm4-b";
         return true;
     }
     for (timer8 = 0; timer8 < BBK9288S_8TM_CHANNELS; timer8++) {
@@ -2043,27 +2081,31 @@ static void bbk9288s_timer16_update(BBK9288SState *s)
     }
 }
 
-static bool bbk9288s_timer2b_armed(BBK9288SState *s)
+static bool bbk9288s_timer_compare_b_armed(BBK9288SState *s,
+                                           unsigned channel)
 {
     uint8_t clock_ctrl =
-        s->io_regs[BBK9288S_16TM_CLOCK_CTRL(2)];
-    uint8_t timer_ctrl = s->io_regs[BBK9288S_16TM_CTRL(2)];
+        s->io_regs[BBK9288S_16TM_CLOCK_CTRL(channel)];
+    uint8_t timer_ctrl = s->io_regs[BBK9288S_16TM_CTRL(channel)];
 
     return (clock_ctrl & 0x08) != 0 &&
            (timer_ctrl & BBK9288S_16TM_CTRL_PRUN) != 0 &&
            (timer_ctrl & BBK9288S_16TM_CTRL_CKSL) == 0 &&
-           bbk9288s_timer16_lduw(s, BBK9288S_16TM_COMPARE_B(2)) != 0;
+           bbk9288s_timer16_lduw(
+               s, BBK9288S_16TM_COMPARE_B(channel)) != 0;
 }
 
-static uint64_t bbk9288s_timer2b_period_ms(BBK9288SState *s)
+static uint64_t bbk9288s_timer_compare_b_period_ms(BBK9288SState *s,
+                                                   unsigned channel)
 {
     static const uint16_t divisors[8] = {
         1, 2, 4, 16, 64, 256, 1024, 4096,
     };
     uint16_t compare =
-        bbk9288s_timer16_lduw(s, BBK9288S_16TM_COMPARE_B(2));
+        bbk9288s_timer16_lduw(
+            s, BBK9288S_16TM_COMPARE_B(channel));
     uint8_t clock_ctrl =
-        s->io_regs[BBK9288S_16TM_CLOCK_CTRL(2)];
+        s->io_regs[BBK9288S_16TM_CLOCK_CTRL(channel)];
     uint64_t cycles = (uint64_t)compare * divisors[clock_ctrl & 0x07];
     uint64_t source_hz = BBK9288S_OSC3_PLL_HZ;
 
@@ -2078,7 +2120,7 @@ static void bbk9288s_timer2b_compare_cb(void *opaque)
 {
     BBK9288SState *s = opaque;
 
-    if (!bbk9288s_timer2b_armed(s)) {
+    if (!bbk9288s_timer_compare_b_armed(s, 2)) {
         bbk9288s_timer2b_update(s);
         return;
     }
@@ -2096,7 +2138,7 @@ static void bbk9288s_timer2b_compare_cb(void *opaque)
                       s->io_regs[BBK9288S_EIR3_16TM2_3],
                       s->io_regs[BBK9288S_FIR3_16TM2_3],
                       s->io_regs[BBK9288S_PIR3_16TM2_3],
-                      bbk9288s_timer2b_period_ms(s));
+                      bbk9288s_timer_compare_b_period_ms(s, 2));
     }
     bbk9288s_update_irq(s);
     bbk9288s_timer2b_update(s);
@@ -2104,7 +2146,7 @@ static void bbk9288s_timer2b_compare_cb(void *opaque)
 
 static void bbk9288s_timer2b_update(BBK9288SState *s)
 {
-    if (!bbk9288s_timer2b_armed(s)) {
+    if (!bbk9288s_timer_compare_b_armed(s, 2)) {
         if (s->timer2b_compare_timer != NULL) {
             timer_del(s->timer2b_compare_timer);
         }
@@ -2118,7 +2160,54 @@ static void bbk9288s_timer2b_update(BBK9288SState *s)
     if (!timer_pending(s->timer2b_compare_timer)) {
         timer_mod(s->timer2b_compare_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
-                  bbk9288s_timer2b_period_ms(s));
+                  bbk9288s_timer_compare_b_period_ms(s, 2));
+    }
+}
+
+static void bbk9288s_timer4b_compare_cb(void *opaque)
+{
+    BBK9288SState *s = opaque;
+
+    if (!bbk9288s_timer_compare_b_armed(s, 4)) {
+        bbk9288s_timer4b_update(s);
+        return;
+    }
+
+    bbk9288s_timer16_stw(s, BBK9288S_16TM_COUNTER(4), 0);
+    s->io_regs[BBK9288S_FIR4_16TM4_5] |= BBK9288S_16TM4B_IRQ_BIT;
+    if (s->trace_io) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "bbk9288s-timer: 16tm4-b factor set "
+                      "cmpb=0x%04x eir=0x%02x fir=0x%02x "
+                      "pir=0x%02x period=%" PRIu64 "ms\n",
+                      bbk9288s_timer16_lduw(
+                          s, BBK9288S_16TM_COMPARE_B(4)),
+                      s->io_regs[BBK9288S_EIR4_16TM4_5],
+                      s->io_regs[BBK9288S_FIR4_16TM4_5],
+                      s->io_regs[BBK9288S_PIR4_16TM4_5],
+                      bbk9288s_timer_compare_b_period_ms(s, 4));
+    }
+    bbk9288s_update_irq(s);
+    bbk9288s_timer4b_update(s);
+}
+
+static void bbk9288s_timer4b_update(BBK9288SState *s)
+{
+    if (!bbk9288s_timer_compare_b_armed(s, 4)) {
+        if (s->timer4b_compare_timer != NULL) {
+            timer_del(s->timer4b_compare_timer);
+        }
+        return;
+    }
+    if (s->timer4b_compare_timer == NULL) {
+        s->timer4b_compare_timer =
+            timer_new_ms(QEMU_CLOCK_REALTIME,
+                         bbk9288s_timer4b_compare_cb, s);
+    }
+    if (!timer_pending(s->timer4b_compare_timer)) {
+        timer_mod(s->timer4b_compare_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  bbk9288s_timer_compare_b_period_ms(s, 4));
     }
 }
 
@@ -2606,6 +2695,9 @@ static uint8_t bbk9288s_gpio_input_low_mask(BBK9288SState *s,
 
     if (port_index == BBK9288S_KEY_GPIO_PORT) {
         input_low |= touch_low;
+        if (!bbk9288s_audio_dreq_ready(s)) {
+            input_low |= BBK9288S_AUDIO_DREQ_GPIO_BIT;
+        }
     }
 
     return input_low;
@@ -3142,6 +3234,8 @@ static bool bbk9288s_timer16_write_byte(BBK9288SState *s, hwaddr offset,
             bbk9288s_timer16_update(s);
         } else if (channel == 2) {
             bbk9288s_timer2b_update(s);
+        } else if (channel == 4) {
+            bbk9288s_timer4b_update(s);
         }
         return true;
     }
@@ -3169,6 +3263,8 @@ static bool bbk9288s_timer16_write_byte(BBK9288SState *s, hwaddr offset,
             bbk9288s_timer16_update(s);
         } else if (channel == 2) {
             bbk9288s_timer2b_update(s);
+        } else if (channel == 4) {
+            bbk9288s_timer4b_update(s);
         }
         return true;
     }
@@ -3178,6 +3274,8 @@ static bool bbk9288s_timer16_write_byte(BBK9288SState *s, hwaddr offset,
         bbk9288s_timer16_update(s);
     } else if (channel == 2) {
         bbk9288s_timer2b_update(s);
+    } else if (channel == 4) {
+        bbk9288s_timer4b_update(s);
     }
     return true;
 }
@@ -3323,6 +3421,11 @@ static void bbk9288s_io_store_masked(BBK9288SState *s, hwaddr offset,
         bbk9288s_timer2b_update(s);
         bbk9288s_timer3b_update(s);
     }
+    if (bbk9288s_range_touches(offset, size, BBK9288S_PIR4_16TM4_5, 1) ||
+        bbk9288s_range_touches(offset, size, BBK9288S_EIR4_16TM4_5, 1) ||
+        bbk9288s_range_touches(offset, size, BBK9288S_FIR4_16TM4_5, 1)) {
+        bbk9288s_timer4b_update(s);
+    }
     if (bbk9288s_range_touches(offset, size, BBK9288S_PIR_8TM_SIF0, 1) ||
         bbk9288s_range_touches(offset, size, BBK9288S_EIR5_8TM0_3, 1) ||
         bbk9288s_range_touches(offset, size, BBK9288S_FIR5_8TM0_3, 1) ||
@@ -3371,6 +3474,9 @@ static void bbk9288s_io_reset(BBK9288SState *s)
     }
     if (s->timer2b_compare_timer != NULL) {
         timer_del(s->timer2b_compare_timer);
+    }
+    if (s->timer4b_compare_timer != NULL) {
+        timer_del(s->timer4b_compare_timer);
     }
     if (s->clock_timer != NULL) {
         timer_del(s->clock_timer);
@@ -3499,6 +3605,9 @@ static void bbk9288s_exit_notify(Notifier *notifier, void *data)
     }
     if (s->timer2b_compare_timer != NULL) {
         timer_del(s->timer2b_compare_timer);
+    }
+    if (s->timer4b_compare_timer != NULL) {
+        timer_del(s->timer4b_compare_timer);
     }
     if (s->timer8_underflow_timer != NULL) {
         timer_del(s->timer8_underflow_timer);
@@ -3707,6 +3816,7 @@ static void bbk9288s_touch_io_write_byte(BBK9288SState *s, hwaddr offset,
     old = s->touch_io_regs[offset];
     s->touch_io_regs[offset] =
         (value & ~BBK9288S_TOUCH_MISO) | (old & BBK9288S_TOUCH_MISO);
+    bbk9288s_audio_select_update(s, old, s->touch_io_regs[offset]);
     if ((old & BBK9288S_TOUCH_CLK) == 0 &&
         (value & BBK9288S_TOUCH_CLK) != 0) {
         bbk9288s_touch_serial_clock_rise(s);
@@ -3753,12 +3863,58 @@ static bool bbk9288s_audio_stream_selected(BBK9288SState *s)
     return (select & 0x01) == 0 && (select & 0x02) != 0;
 }
 
+static bool bbk9288s_audio_control_selected_value(uint8_t select)
+{
+    return (select & 0x01) != 0 && (select & 0x02) == 0;
+}
+
+static bool bbk9288s_audio_control_selected(BBK9288SState *s)
+{
+    return bbk9288s_audio_control_selected_value(
+        s->touch_io_regs[BBK9288S_TOUCH_SERIAL]);
+}
+
+static void bbk9288s_audio_sci_transaction_reset(BBK9288SState *s)
+{
+    s->audio_sci_command = 0;
+    s->audio_sci_register = 0;
+    s->audio_sci_phase = 0;
+    s->audio_sci_read_pos = 0;
+}
+
+static void bbk9288s_audio_select_update(BBK9288SState *s, uint8_t old,
+                                         uint8_t value)
+{
+    bool old_control = bbk9288s_audio_control_selected_value(old);
+    bool new_control = bbk9288s_audio_control_selected_value(value);
+
+    if (old_control != new_control) {
+        bbk9288s_audio_sci_transaction_reset(s);
+    }
+}
+
+static void bbk9288s_audio_decoder_reset(BBK9288SState *s)
+{
+    s->audio_fifo_level = 0;
+    s->audio_bytes_per_second = BBK9288S_AUDIO_DEFAULT_BYTES_PER_SECOND;
+    s->audio_mp3_header = 0;
+    s->audio_candidate_bytes_per_second = 0;
+    s->audio_candidate_frames = 0;
+    s->audio_fifo_updated_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    s->audio_drain_remainder = 0;
+    s->audio_decoded_ns = 0;
+    s->audio_decode_remainder = 0;
+    s->audio_dreq_bytes = 0;
+}
+
 static void bbk9288s_audio_fifo_update(BBK9288SState *s)
 {
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int64_t elapsed = now - s->audio_fifo_updated_ns;
     uint64_t scaled;
     uint64_t drained;
+    uint64_t consumed;
+    uint64_t decoded_scaled;
 
     s->audio_fifo_updated_ns = now;
     if (elapsed <= 0 || s->audio_fifo_level == 0) {
@@ -3772,19 +3928,32 @@ static void bbk9288s_audio_fifo_update(BBK9288SState *s)
              s->audio_drain_remainder;
     drained = scaled / NANOSECONDS_PER_SECOND;
     s->audio_drain_remainder = scaled % NANOSECONDS_PER_SECOND;
-    if (drained >= s->audio_fifo_level) {
+    consumed = MIN(drained, s->audio_fifo_level);
+    decoded_scaled = consumed * NANOSECONDS_PER_SECOND +
+                     s->audio_decode_remainder;
+    s->audio_decoded_ns += decoded_scaled / s->audio_bytes_per_second;
+    s->audio_decode_remainder =
+        decoded_scaled % s->audio_bytes_per_second;
+    if (consumed == s->audio_fifo_level) {
         s->audio_fifo_level = 0;
         s->audio_drain_remainder = 0;
     } else {
-        s->audio_fifo_level -= drained;
+        s->audio_fifo_level -= consumed;
     }
 }
 
-static bool bbk9288s_audio_write_ready(BBK9288SState *s)
+static bool bbk9288s_audio_dreq_ready(BBK9288SState *s)
 {
     bbk9288s_audio_fifo_update(s);
-    return s->audio_fifo_level + BBK9288S_AUDIO_DREQ_BYTES <=
-           BBK9288S_AUDIO_FIFO_CAPACITY;
+    if (s->audio_dreq_bytes != 0) {
+        return true;
+    }
+    if (s->audio_fifo_level + BBK9288S_AUDIO_DREQ_BYTES >
+        BBK9288S_AUDIO_FIFO_CAPACITY) {
+        return false;
+    }
+    s->audio_dreq_bytes = BBK9288S_AUDIO_DREQ_BYTES;
+    return true;
 }
 
 static unsigned bbk9288s_audio_mp3_rate(uint32_t header)
@@ -3839,6 +4008,7 @@ static void bbk9288s_audio_detect_rate(BBK9288SState *s, uint8_t value)
 
     bbk9288s_audio_fifo_update(s);
     s->audio_bytes_per_second = bytes_per_second;
+    s->audio_decode_remainder = 0;
     info_report("BBK9288S audio MPEG rate: %u kbps",
                 bytes_per_second * 8 / 1000);
 }
@@ -3921,8 +4091,114 @@ static void bbk9288s_audio_data_write(BBK9288SState *s, uint8_t value)
         return;
     }
     s->audio_fifo_level++;
+    if (s->audio_dreq_bytes != 0) {
+        s->audio_dreq_bytes--;
+    }
     bbk9288s_audio_detect_rate(s, value);
     bbk9288s_audio_stream_write(s, value);
+}
+
+static uint16_t bbk9288s_audio_sci_read_register(BBK9288SState *s,
+                                                 uint8_t reg)
+{
+    bbk9288s_audio_fifo_update(s);
+    switch (reg) {
+    case BBK9288S_AUDIO_SCI_DECODE_TIME:
+        return MIN(s->audio_decoded_ns / NANOSECONDS_PER_SECOND, UINT16_MAX);
+    case BBK9288S_AUDIO_SCI_AUDATA:
+        return s->audio_sci_regs[reg] != 0 ?
+               s->audio_sci_regs[reg] : BBK9288S_AUDIO_DEFAULT_AUDATA;
+    default:
+        return s->audio_sci_regs[reg & 0x0f];
+    }
+}
+
+static void bbk9288s_audio_sci_write_register(BBK9288SState *s,
+                                              uint8_t reg,
+                                              uint16_t value)
+{
+    reg &= 0x0f;
+    switch (reg) {
+    case BBK9288S_AUDIO_SCI_MODE:
+        if ((value & BBK9288S_AUDIO_SCI_MODE_RESET) != 0) {
+            bbk9288s_audio_decoder_reset(s);
+            value &= ~BBK9288S_AUDIO_SCI_MODE_RESET;
+        }
+        break;
+    case BBK9288S_AUDIO_SCI_DECODE_TIME:
+        s->audio_decoded_ns = (uint64_t)value * NANOSECONDS_PER_SECOND;
+        s->audio_decode_remainder = 0;
+        break;
+    default:
+        break;
+    }
+    s->audio_sci_regs[reg] = value;
+    if (s->trace_io) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "bbk9288s-audio: SCI write reg=0x%02x value=0x%04x\n",
+                      reg, value);
+    }
+}
+
+static void bbk9288s_audio_sci_write(BBK9288SState *s, uint8_t value)
+{
+    uint16_t reg_value;
+
+    if (!bbk9288s_audio_control_selected(s)) {
+        return;
+    }
+    switch (s->audio_sci_phase) {
+    case 0:
+        if (value != BBK9288S_AUDIO_SCI_WRITE &&
+            value != BBK9288S_AUDIO_SCI_READ) {
+            return;
+        }
+        s->audio_sci_command = value;
+        s->audio_sci_phase = 1;
+        break;
+    case 1:
+        s->audio_sci_register = value & 0x0f;
+        if (s->audio_sci_command == BBK9288S_AUDIO_SCI_READ) {
+            reg_value = bbk9288s_audio_sci_read_register(
+                s, s->audio_sci_register);
+            s->audio_sci_read_data[0] = reg_value >> 8;
+            s->audio_sci_read_data[1] = reg_value;
+            s->audio_sci_read_pos = 0;
+            s->audio_sci_phase = 4;
+            if (s->trace_io) {
+                qemu_log_mask(
+                    LOG_GUEST_ERROR,
+                    "bbk9288s-audio: SCI read reg=0x%02x value=0x%04x\n",
+                    s->audio_sci_register, reg_value);
+            }
+        } else {
+            s->audio_sci_phase = 2;
+        }
+        break;
+    case 2:
+        s->audio_sci_read_data[0] = value;
+        s->audio_sci_phase = 3;
+        break;
+    case 3:
+        reg_value = ((uint16_t)s->audio_sci_read_data[0] << 8) | value;
+        bbk9288s_audio_sci_write_register(
+            s, s->audio_sci_register, reg_value);
+        s->audio_sci_phase = 4;
+        break;
+    default:
+        /* SCI reads use DATA_OUT dummy writes to clock DATA_IN bytes. */
+        break;
+    }
+}
+
+static uint8_t bbk9288s_audio_sci_data_read(BBK9288SState *s)
+{
+    if (!bbk9288s_audio_control_selected(s) ||
+        s->audio_sci_command != BBK9288S_AUDIO_SCI_READ ||
+        s->audio_sci_read_pos >= ARRAY_SIZE(s->audio_sci_read_data)) {
+        return 0xff;
+    }
+    return s->audio_sci_read_data[s->audio_sci_read_pos++];
 }
 
 static void bbk9288s_audio_record(BBK9288SState *s, bool is_write,
@@ -3958,13 +4234,14 @@ static uint64_t bbk9288s_audio_io_read(void *opaque, hwaddr offset,
     }
     if (offset <= BBK9288S_AUDIO_STATUS &&
         offset + size > BBK9288S_AUDIO_STATUS) {
-        if (bbk9288s_audio_write_ready(s)) {
-            s->audio_regs[BBK9288S_AUDIO_STATUS] |=
-                BBK9288S_AUDIO_WRITE_READY;
-        } else {
-            s->audio_regs[BBK9288S_AUDIO_STATUS] &=
-                ~BBK9288S_AUDIO_WRITE_READY;
-        }
+        /* Parallel bus ready is separate from the decoder DREQ on P0.3. */
+        s->audio_regs[BBK9288S_AUDIO_STATUS] |=
+            BBK9288S_AUDIO_READ_READY | BBK9288S_AUDIO_WRITE_READY;
+    }
+    if (offset <= BBK9288S_AUDIO_DATA_IN &&
+        offset + size > BBK9288S_AUDIO_DATA_IN) {
+        s->audio_regs[BBK9288S_AUDIO_DATA_IN] =
+            bbk9288s_audio_sci_data_read(s);
     }
     for (i = 0; i < size; i++) {
         value |= (uint64_t)s->audio_regs[offset + i] << (i * 8);
@@ -3991,7 +4268,11 @@ static void bbk9288s_audio_io_write(void *opaque, hwaddr offset,
         }
     }
     if (offset == BBK9288S_AUDIO_DATA_OUT) {
-        bbk9288s_audio_data_write(s, value & 0xff);
+        if (bbk9288s_audio_stream_selected(s)) {
+            bbk9288s_audio_data_write(s, value & 0xff);
+        } else {
+            bbk9288s_audio_sci_write(s, value & 0xff);
+        }
     }
     bbk9288s_audio_record(s, true, offset, value, size);
 }
@@ -4017,17 +4298,18 @@ static void bbk9288s_audio_init(BBK9288SState *s, const char *path)
     memset(s->audio_seen, 0, sizeof(s->audio_seen));
     s->audio_regs[BBK9288S_AUDIO_STATUS] =
         BBK9288S_AUDIO_READ_READY | BBK9288S_AUDIO_WRITE_READY;
+    memset(s->audio_sci_regs, 0, sizeof(s->audio_sci_regs));
+    s->audio_sci_regs[BBK9288S_AUDIO_SCI_MODE] =
+        BBK9288S_AUDIO_SCI_MODE_SDINEW;
+    s->audio_sci_regs[BBK9288S_AUDIO_SCI_AUDATA] =
+        BBK9288S_AUDIO_DEFAULT_AUDATA;
+    s->audio_sci_regs[BBK9288S_AUDIO_SCI_VOL] = 0xffff;
+    bbk9288s_audio_sci_transaction_reset(s);
     s->audio_stream_path =
         g_strdup(path != NULL && path[0] != 0 ? path : NULL);
     s->audio_stream_bytes = 0;
     s->audio_flush_bytes = 0;
-    s->audio_fifo_level = 0;
-    s->audio_bytes_per_second = BBK9288S_AUDIO_DEFAULT_BYTES_PER_SECOND;
-    s->audio_mp3_header = 0;
-    s->audio_candidate_bytes_per_second = 0;
-    s->audio_candidate_frames = 0;
-    s->audio_fifo_updated_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    s->audio_drain_remainder = 0;
+    bbk9288s_audio_decoder_reset(s);
 
     if (s->audio_stream_path == NULL) {
         info_report("BBK9288S audio stream output disabled");

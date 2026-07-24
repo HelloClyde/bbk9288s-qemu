@@ -78,13 +78,19 @@ Implemented pieces:
   `+0x00`, writes decoder commands or compressed bytes at `+0x02`, controls
   the interface at `+0x04/+0x08`, and polls `+0x0a` bits `0x04/0x10` for
   read/write readiness. Active-low board selects in `0x00300020` distinguish
-  control transactions from the compressed stream. The optional
-  `audio-stream` machine property writes only bytes received while the stream
-  select is active. A 2 KiB decoder FIFO deasserts write-ready unless at least
-  one 32-byte firmware transfer fits, drains at the detected MPEG bitrate, and
-  prevents the guest feeder loop from starving normal application execution.
-  The capture rotates at 32 MiB; the Web server forwards that hardware output
-  to the browser and never reads audio files from NAND.
+  control transactions from the compressed stream. The control path implements
+  VS1003 SCI read (`0x03`) and write (`0x02`) transactions, including MODE
+  software reset, CLOCKF, DECODE_TIME, AUDATA, and VOL state. Timer4-B raises
+  FIR4 bit 2 on vector 46 so the firmware runs its periodic SCI query path.
+  The optional `audio-stream` machine property writes only bytes received while
+  the stream select is active. An 8 KiB effective decoder input queue drives
+  the real DREQ signal on P0.3 in 32-byte grants; parallel bus write-ready at
+  `+0x0a bit 0x10` remains a separate signal. The queue drains at the detected
+  MPEG bitrate on a real-time clock, and DECODE_TIME reports consumed full
+  seconds. Guest writes to DECODE_TIME also reposition the decoder clock, so
+  stop and replay begin again at zero. The capture rotates at 32 MiB; the Web
+  server forwards that hardware output to the browser and never reads audio
+  files from NAND.
 - Board-level Samsung-compatible NAND at `0x04000000`, identified as
   `EC DA 10 95`: 256 MiB data, 2 KiB pages, 64-byte OOB, 64 pages per block,
   and 2048 blocks. Read, program, erase, status, ID, CPU access, and HSDMA access
