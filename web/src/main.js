@@ -83,7 +83,9 @@ const keyMap = {
   enter: { keysym: 0xff0d, code: "Enter" },
   escape: { keysym: 0xff1b, code: "Escape" },
 };
-const minimumKeyHoldMs = 40;
+// The firmware scans the physical key matrix at a relatively slow cadence.
+// Keep quick Web taps asserted long enough to cross a complete scan window.
+const minimumKeyHoldMs = 180;
 const minimumTouchHoldMs = 180;
 
 let rfb = null;
@@ -92,6 +94,12 @@ let manualDisconnect = false;
 let powerBusy = false;
 let audioEnabled = false;
 let audioReconnectTimer = null;
+let audioSession = 0;
+let audioOffset = 0;
+let audioAbortController = null;
+let audioMediaSource = null;
+let audioSourceBuffer = null;
+let audioObjectUrl = null;
 
 const savedVolume = Number.parseFloat(
   window.localStorage.getItem("bbk9288s.audioVolume") || "0.8",
@@ -118,19 +126,169 @@ function setAudioState() {
   audioVolumeValue.value = `${Math.round(audioElement.volume * 100)}%`;
 }
 
+function closeAudioPipeline() {
+  audioAbortController?.abort();
+  audioAbortController = null;
+  if (audioSourceBuffer?.updating) {
+    try {
+      audioSourceBuffer.abort();
+    } catch {
+      // The MediaSource may already be closing.
+    }
+  }
+  audioSourceBuffer = null;
+  audioMediaSource = null;
+  audioElement.pause();
+  audioElement.removeAttribute("src");
+  audioElement.load();
+  if (audioObjectUrl) {
+    URL.revokeObjectURL(audioObjectUrl);
+    audioObjectUrl = null;
+  }
+}
+
+function waitForMediaSourceOpen(mediaSource) {
+  if (mediaSource.readyState === "open") {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const opened = () => {
+      cleanup();
+      resolve();
+    };
+    const failed = () => {
+      cleanup();
+      reject(new Error("浏览器音频缓冲初始化失败"));
+    };
+    const cleanup = () => {
+      mediaSource.removeEventListener("sourceopen", opened);
+      mediaSource.removeEventListener("sourceclose", failed);
+    };
+    mediaSource.addEventListener("sourceopen", opened, { once: true });
+    mediaSource.addEventListener("sourceclose", failed, { once: true });
+  });
+}
+
+function runSourceBufferOperation(operation) {
+  return new Promise((resolve, reject) => {
+    const sourceBuffer = audioSourceBuffer;
+    if (!sourceBuffer || audioMediaSource?.readyState !== "open") {
+      reject(new Error("浏览器音频缓冲已关闭"));
+      return;
+    }
+    const completed = () => {
+      cleanup();
+      resolve();
+    };
+    const failed = () => {
+      cleanup();
+      reject(new Error("浏览器无法追加音频码流"));
+    };
+    const cleanup = () => {
+      sourceBuffer.removeEventListener("updateend", completed);
+      sourceBuffer.removeEventListener("error", failed);
+    };
+    sourceBuffer.addEventListener("updateend", completed, { once: true });
+    sourceBuffer.addEventListener("error", failed, { once: true });
+    try {
+      operation(sourceBuffer);
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
+async function appendAudioChunk(chunk, session) {
+  if (session !== audioSession || !audioSourceBuffer) {
+    return;
+  }
+  await runSourceBufferOperation((sourceBuffer) => {
+    sourceBuffer.appendBuffer(chunk);
+  });
+  if (
+    audioElement.currentTime > 30 &&
+    audioSourceBuffer?.buffered.length > 0
+  ) {
+    const removeBefore = audioElement.currentTime - 20;
+    if (audioSourceBuffer.buffered.start(0) < removeBefore) {
+      await runSourceBufferOperation((sourceBuffer) => {
+        sourceBuffer.remove(0, removeBefore);
+      });
+    }
+  }
+}
+
+async function pumpAudioStream(session) {
+  while (audioEnabled && session === audioSession) {
+    let received = 0;
+    audioAbortController = new AbortController();
+    const response = await fetch(audioStreamUrl(audioOffset), {
+      cache: "no-store",
+      signal: audioAbortController.signal,
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`音频流连接失败 (${response.status})`);
+    }
+
+    const reader = response.body.getReader();
+    while (audioEnabled && session === audioSession) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      received += value.byteLength;
+      audioOffset += value.byteLength;
+      await appendAudioChunk(value, session);
+      if (audioElement.paused && !audioElement.muted) {
+        audioElement.play().catch((error) => {
+          if (error.name !== "AbortError") {
+            console.error("audio playback failed", error);
+          }
+        });
+      }
+    }
+
+    if (received === 0 && audioEnabled && session === audioSession) {
+      const status = await apiRequest("/api/status");
+      if ((Number(status.audioBytes) || 0) < audioOffset) {
+        audioOffset = 0;
+      }
+    }
+  }
+}
+
 async function openAudioStream() {
   if (!audioEnabled) {
     return;
   }
   window.clearTimeout(audioReconnectTimer);
+  const session = ++audioSession;
+  closeAudioPipeline();
   try {
     const status = await apiRequest("/api/status");
-    if (!audioEnabled) {
+    if (!audioEnabled || session !== audioSession) {
       return;
     }
-    const offset = Math.max(0, Number(status.audioBytes) || 0);
-    audioElement.pause();
-    audioElement.src = audioStreamUrl(offset);
+    audioOffset = Math.max(0, Number(status.audioBytes) || 0);
+
+    if (
+      typeof MediaSource === "undefined" ||
+      !MediaSource.isTypeSupported("audio/mpeg")
+    ) {
+      audioElement.src = audioStreamUrl(audioOffset);
+      audioElement.load();
+      audioElement.play().catch((error) => {
+        if (error.name !== "AbortError") {
+          console.error("audio playback failed", error);
+        }
+      });
+      return;
+    }
+
+    audioMediaSource = new MediaSource();
+    audioObjectUrl = URL.createObjectURL(audioMediaSource);
+    audioElement.src = audioObjectUrl;
     audioElement.load();
     const playing = audioElement.play();
     if (playing) {
@@ -140,9 +298,18 @@ async function openAudioStream() {
         }
       });
     }
+    await waitForMediaSourceOpen(audioMediaSource);
+    if (!audioEnabled || session !== audioSession) {
+      return;
+    }
+    audioSourceBuffer = audioMediaSource.addSourceBuffer("audio/mpeg");
+    audioSourceBuffer.mode = "sequence";
+    await pumpAudioStream(session);
   } catch (error) {
-    console.error("audio stream connection failed", error);
-    scheduleAudioReconnect();
+    if (error.name !== "AbortError" && session === audioSession) {
+      console.error("audio stream connection failed", error);
+      scheduleAudioReconnect();
+    }
   }
 }
 
@@ -470,7 +637,8 @@ window.addEventListener("beforeunload", () => {
   manualDisconnect = true;
   rfb?.disconnect();
   window.clearTimeout(audioReconnectTimer);
-  audioElement.pause();
+  audioSession++;
+  closeAudioPipeline();
 });
 
 connect();

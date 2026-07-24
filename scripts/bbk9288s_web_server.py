@@ -615,7 +615,7 @@ class WebHandler(SimpleHTTPRequestHandler):
                 try:
                     size = stream_path.stat().st_size
                     if size < position:
-                        position = 0
+                        break
                     if size > position:
                         with stream_path.open("rb") as source:
                             source.seek(position)

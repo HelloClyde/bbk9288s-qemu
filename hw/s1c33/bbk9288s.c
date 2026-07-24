@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bitops.h"
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
@@ -57,6 +58,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(BBK9288SMachineState, BBK9288S_MACHINE)
 #define BBK9288S_AUDIO_READ_READY  0x04
 #define BBK9288S_AUDIO_WRITE_READY 0x10
 #define BBK9288S_AUDIO_STREAM_FLUSH_BYTES 512
+#define BBK9288S_AUDIO_FIFO_CAPACITY 2048
+#define BBK9288S_AUDIO_DREQ_BYTES 32
+#define BBK9288S_AUDIO_DEFAULT_BYTES_PER_SECOND 16000
+#define BBK9288S_AUDIO_STREAM_MAX_BYTES (32 * MiB)
 #define BBK9288S_NAND_DATA_BASE 0x04000000u
 #define BBK9288S_NAND_DATA_SIZE 0x00001000u
 #define BBK9288S_NAND_CE_SELECT 0x100
@@ -431,6 +436,13 @@ typedef struct BBK9288SState {
     char *audio_stream_path;
     uint64_t audio_stream_bytes;
     unsigned audio_flush_bytes;
+    uint32_t audio_fifo_level;
+    uint32_t audio_bytes_per_second;
+    uint32_t audio_mp3_header;
+    uint32_t audio_candidate_bytes_per_second;
+    unsigned audio_candidate_frames;
+    int64_t audio_fifo_updated_ns;
+    uint64_t audio_drain_remainder;
     uint64_t hsdma_transfer_count[BBK9288S_HSDMA_CHANNELS];
     uint8_t adc_last_channel;
     uint8_t touch_fpt;
@@ -3741,6 +3753,96 @@ static bool bbk9288s_audio_stream_selected(BBK9288SState *s)
     return (select & 0x01) == 0 && (select & 0x02) != 0;
 }
 
+static void bbk9288s_audio_fifo_update(BBK9288SState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t elapsed = now - s->audio_fifo_updated_ns;
+    uint64_t scaled;
+    uint64_t drained;
+
+    s->audio_fifo_updated_ns = now;
+    if (elapsed <= 0 || s->audio_fifo_level == 0) {
+        if (s->audio_fifo_level == 0) {
+            s->audio_drain_remainder = 0;
+        }
+        return;
+    }
+
+    scaled = (uint64_t)elapsed * s->audio_bytes_per_second +
+             s->audio_drain_remainder;
+    drained = scaled / NANOSECONDS_PER_SECOND;
+    s->audio_drain_remainder = scaled % NANOSECONDS_PER_SECOND;
+    if (drained >= s->audio_fifo_level) {
+        s->audio_fifo_level = 0;
+        s->audio_drain_remainder = 0;
+    } else {
+        s->audio_fifo_level -= drained;
+    }
+}
+
+static bool bbk9288s_audio_write_ready(BBK9288SState *s)
+{
+    bbk9288s_audio_fifo_update(s);
+    return s->audio_fifo_level + BBK9288S_AUDIO_DREQ_BYTES <=
+           BBK9288S_AUDIO_FIFO_CAPACITY;
+}
+
+static unsigned bbk9288s_audio_mp3_rate(uint32_t header)
+{
+    static const unsigned mpeg1_layer3_kbps[16] = {
+        0, 32, 40, 48, 56, 64, 80, 96,
+        112, 128, 160, 192, 224, 256, 320, 0,
+    };
+    static const unsigned mpeg2_layer3_kbps[16] = {
+        0, 8, 16, 24, 32, 40, 48, 56,
+        64, 80, 96, 112, 128, 144, 160, 0,
+    };
+    unsigned version = extract32(header, 19, 2);
+    unsigned layer = extract32(header, 17, 2);
+    unsigned bitrate_index = extract32(header, 12, 4);
+    unsigned sample_rate_index = extract32(header, 10, 2);
+    unsigned kbps;
+
+    if ((header & 0xffe00000) != 0xffe00000 ||
+        version == 1 || layer != 1 ||
+        bitrate_index == 0 || bitrate_index == 15 ||
+        sample_rate_index == 3) {
+        return 0;
+    }
+
+    kbps = version == 3 ? mpeg1_layer3_kbps[bitrate_index] :
+                          mpeg2_layer3_kbps[bitrate_index];
+    return kbps * 1000 / 8;
+}
+
+static void bbk9288s_audio_detect_rate(BBK9288SState *s, uint8_t value)
+{
+    unsigned bytes_per_second;
+
+    s->audio_mp3_header = (s->audio_mp3_header << 8) | value;
+    bytes_per_second = bbk9288s_audio_mp3_rate(s->audio_mp3_header);
+    if (bytes_per_second == 0) {
+        return;
+    }
+    if (bytes_per_second != s->audio_candidate_bytes_per_second) {
+        s->audio_candidate_bytes_per_second = bytes_per_second;
+        s->audio_candidate_frames = 1;
+        return;
+    }
+    if (s->audio_candidate_frames < 2) {
+        s->audio_candidate_frames++;
+    }
+    if (s->audio_candidate_frames < 2 ||
+        bytes_per_second == s->audio_bytes_per_second) {
+        return;
+    }
+
+    bbk9288s_audio_fifo_update(s);
+    s->audio_bytes_per_second = bytes_per_second;
+    info_report("BBK9288S audio MPEG rate: %u kbps",
+                bytes_per_second * 8 / 1000);
+}
+
 static void bbk9288s_audio_flush_cb(void *opaque)
 {
     BBK9288SState *s = opaque;
@@ -3751,9 +3853,30 @@ static void bbk9288s_audio_flush_cb(void *opaque)
     }
 }
 
+static bool bbk9288s_audio_stream_rotate(BBK9288SState *s)
+{
+    if (s->audio_stream_bytes < BBK9288S_AUDIO_STREAM_MAX_BYTES) {
+        return true;
+    }
+
+    fflush(s->audio_stream);
+    fclose(s->audio_stream);
+    s->audio_stream = fopen(s->audio_stream_path, "wb");
+    s->audio_stream_bytes = 0;
+    s->audio_flush_bytes = 0;
+    if (s->audio_stream == NULL) {
+        warn_report("could not rotate BBK9288S audio stream '%s': %s",
+                    s->audio_stream_path, strerror(errno));
+        return false;
+    }
+    info_report("BBK9288S audio stream rotated at %u MiB",
+                (unsigned)(BBK9288S_AUDIO_STREAM_MAX_BYTES / MiB));
+    return true;
+}
+
 static void bbk9288s_audio_stream_write(BBK9288SState *s, uint8_t value)
 {
-    if (s->audio_stream == NULL || !bbk9288s_audio_stream_selected(s)) {
+    if (s->audio_stream == NULL || !bbk9288s_audio_stream_rotate(s)) {
         return;
     }
 
@@ -3787,6 +3910,21 @@ static void bbk9288s_audio_stream_write(BBK9288SState *s, uint8_t value)
     }
 }
 
+static void bbk9288s_audio_data_write(BBK9288SState *s, uint8_t value)
+{
+    if (!bbk9288s_audio_stream_selected(s)) {
+        return;
+    }
+
+    bbk9288s_audio_fifo_update(s);
+    if (s->audio_fifo_level >= BBK9288S_AUDIO_FIFO_CAPACITY) {
+        return;
+    }
+    s->audio_fifo_level++;
+    bbk9288s_audio_detect_rate(s, value);
+    bbk9288s_audio_stream_write(s, value);
+}
+
 static void bbk9288s_audio_record(BBK9288SState *s, bool is_write,
                                   hwaddr offset, uint64_t value,
                                   unsigned size)
@@ -3818,6 +3956,16 @@ static uint64_t bbk9288s_audio_io_read(void *opaque, hwaddr offset,
     if (offset + size > BBK9288S_AUDIO_IO_SIZE) {
         return 0;
     }
+    if (offset <= BBK9288S_AUDIO_STATUS &&
+        offset + size > BBK9288S_AUDIO_STATUS) {
+        if (bbk9288s_audio_write_ready(s)) {
+            s->audio_regs[BBK9288S_AUDIO_STATUS] |=
+                BBK9288S_AUDIO_WRITE_READY;
+        } else {
+            s->audio_regs[BBK9288S_AUDIO_STATUS] &=
+                ~BBK9288S_AUDIO_WRITE_READY;
+        }
+    }
     for (i = 0; i < size; i++) {
         value |= (uint64_t)s->audio_regs[offset + i] << (i * 8);
     }
@@ -3843,7 +3991,7 @@ static void bbk9288s_audio_io_write(void *opaque, hwaddr offset,
         }
     }
     if (offset == BBK9288S_AUDIO_DATA_OUT) {
-        bbk9288s_audio_stream_write(s, value & 0xff);
+        bbk9288s_audio_data_write(s, value & 0xff);
     }
     bbk9288s_audio_record(s, true, offset, value, size);
 }
@@ -3873,6 +4021,13 @@ static void bbk9288s_audio_init(BBK9288SState *s, const char *path)
         g_strdup(path != NULL && path[0] != 0 ? path : NULL);
     s->audio_stream_bytes = 0;
     s->audio_flush_bytes = 0;
+    s->audio_fifo_level = 0;
+    s->audio_bytes_per_second = BBK9288S_AUDIO_DEFAULT_BYTES_PER_SECOND;
+    s->audio_mp3_header = 0;
+    s->audio_candidate_bytes_per_second = 0;
+    s->audio_candidate_frames = 0;
+    s->audio_fifo_updated_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->audio_drain_remainder = 0;
 
     if (s->audio_stream_path == NULL) {
         info_report("BBK9288S audio stream output disabled");

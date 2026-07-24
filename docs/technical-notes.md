@@ -80,8 +80,11 @@ Implemented pieces:
   read/write readiness. Active-low board selects in `0x00300020` distinguish
   control transactions from the compressed stream. The optional
   `audio-stream` machine property writes only bytes received while the stream
-  select is active; the Web server forwards that hardware output to the
-  browser and never reads audio files from NAND.
+  select is active. A 2 KiB decoder FIFO deasserts write-ready unless at least
+  one 32-byte firmware transfer fits, drains at the detected MPEG bitrate, and
+  prevents the guest feeder loop from starving normal application execution.
+  The capture rotates at 32 MiB; the Web server forwards that hardware output
+  to the browser and never reads audio files from NAND.
 - Board-level Samsung-compatible NAND at `0x04000000`, identified as
   `EC DA 10 95`: 256 MiB data, 2 KiB pages, 64-byte OOB, 64 pages per block,
   and 2048 blocks. Read, program, erase, status, ID, CPU access, and HSDMA access
@@ -217,11 +220,10 @@ Python HTTP server and QEMU for access from another device.
 
 The LCD accepts mouse, pen, and touch input. The on-screen D-pad and
 confirm/exit controls send the same QEMU key events as the local keyboard. The
-frontend keeps short touches pressed for 180 ms and short keys for 40 ms so the
-original firmware's debounce paths can sample them without making one key press
-span multiple system ticks. Input still travels as normal RFB pointer/key events
-through the QEMU GPIO and serial touch ADC models; there is no guest-memory
-injection or system hook.
+frontend keeps short touches and keys pressed for 180 ms so the original
+firmware's debounce and key-matrix scan paths can sample them reliably. Input
+still travels as normal RFB pointer/key events through the QEMU GPIO and serial
+touch ADC models; there is no guest-memory injection or system hook.
 
 The Power button in the Web header calls the emulator lifecycle API. It starts
 QEMU when the firmware has powered the process off and performs a full QEMU
@@ -231,8 +233,10 @@ power-off is shown as `已关机` instead of an indefinite reconnect state.
 
 The speaker button starts the browser audio stream after a user gesture, as
 required by browser autoplay policies. The model captures the compressed bytes
-sent by the firmware to the board decoder, the HTTP layer delimits each guest
-playback, and the browser performs the final MP3 decode and volume control.
+sent by the firmware to the board decoder. The HTTP layer resumes at exact byte
+offsets and closes a response when the capture rotates; a MediaSource pipeline
+reconnects, appends sequential MP3 data, and trims old browser buffers while
+preserving continuous decode and volume control.
 
 The `NAND 文件` tab provides directory browsing, capacity reporting, upload,
 download, new directory, rename, and recursive delete. Select
